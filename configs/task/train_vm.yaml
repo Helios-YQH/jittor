@@ -1,0 +1,22 @@
+mode: train
+debug: False
+
+components:
+  data: train
+  transform: vm
+  system: vm
+  model: vm
+
+loss:
+  loss: 1.0
+
+optimizer:
+  __target__: adam
+  lr: 0.0001
+
+trainer:
+  epochs: 100
+  scheduler:
+    type: step
+    step_size: 30
+    gamma: 0.1

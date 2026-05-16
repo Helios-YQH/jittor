@@ -1,0 +1,21 @@
+# Python 虚拟环境
+.venv/
+venv/
+env/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 环境变量（如有敏感信息）
+.env
+
+dataset_train/
+dataset_test_noisy/
+datalist/
+results/
+experiments/
+tmp_predict/
+*.zip
+
+dataset_train.tar.gz
