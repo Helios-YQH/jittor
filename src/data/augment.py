@@ -62,6 +62,39 @@ class AugmentNormalizePC(Augment):
         pc = pc - center
         scale = np.sqrt((pc**2).sum(axis=1).max()).max()
         asset.sampled_vertices = pc / scale
+        # 保存归一化参数供后续可能使用
+        if asset.meta is None:
+            asset.meta = {}
+        asset.meta['normalize_center'] = center
+        asset.meta['normalize_scale'] = scale
+
+
+@dataclass(frozen=True)
+class AugmentNormalizePCPredict(Augment):
+    """
+    专门用于预测阶段的归一化
+    对 sampled_vertices_noisy 进行归一化并保存参数
+    """
+    
+    @classmethod
+    def parse(cls, **kwargs) -> 'AugmentNormalizePCPredict':
+        cls.check_keys(kwargs)
+        return AugmentNormalizePCPredict(**kwargs)
+    
+    def apply(self, asset: Asset, **kwargs):
+        pc = asset.sampled_vertices_noisy
+        assert pc is not None, "sampled_vertices_noisy is None, cannot apply AugmentNormalizePCPredict"
+        p_max = pc.max(axis=0)
+        p_min = pc.min(axis=0)
+        center = (p_max + p_min) / 2
+        pc = pc - center
+        scale = np.sqrt((pc**2).sum(axis=1).max()).max()
+        asset.sampled_vertices_noisy = pc / scale
+        # 保存归一化参数用于反归一化
+        if asset.meta is None:
+            asset.meta = {}
+        asset.meta['normalize_center'] = center
+        asset.meta['normalize_scale'] = scale
 
 @dataclass(frozen=True)
 class AugmentAddNoise(Augment):
@@ -177,6 +210,7 @@ def get_augments(*args) -> List[Augment]:
     MAP = {
         "sample": AugmentSample,
         "normalize_pc": AugmentNormalizePC,
+        "normalize_pc_predict": AugmentNormalizePCPredict,
         "add_noise": AugmentAddNoise,
         "linear": AugmentLinear,
         "patch": AugmentPatch,

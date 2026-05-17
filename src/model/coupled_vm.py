@@ -105,6 +105,20 @@ class CoupledVelocityModule(ModelSpec):
                 num_repeat = 2
             for _ in range(num_repeat):
                 pc_next = self.deterministic_euler_step(pc_next.unsqueeze(0), N=3).squeeze(0)
+            
+            # 反归一化
+            asset = batch['asset'][i]
+            if asset.meta is not None and 'normalize_center' in asset.meta and 'normalize_scale' in asset.meta:
+                center = asset.meta['normalize_center']
+                scale = asset.meta['normalize_scale']
+                # 转换为 numpy 进行反归一化
+                if isinstance(pc_next, jt.Var):
+                    pc_next_np = pc_next.numpy()
+                else:
+                    pc_next_np = pc_next
+                pc_next_np = pc_next_np * scale + center
+                pc_next = pc_next_np
+            
             res.append({"pc_denoised": pc_next})
         return res
 
