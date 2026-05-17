@@ -61,14 +61,24 @@ class CoupledVelocityModule(ModelSpec):
         pc_noisy = batch['pc_noisy'].reshape(-1, patch_size, 3)
         pc_mix = batch['pc_mix'].reshape(-1, patch_size, 3)
         pc_clean = batch['pc_clean'].reshape(-1, patch_size, 3)
-        # Use coupled loss: simple sum of vm1/vm2 supervised losses
-        loss_vm1 = self.vm1.get_supervised_loss(pc_noisy, pc_mix, pc_clean)
-        # simulate intermediate X_t1
+        
         B, Np, _ = pc_noisy.shape
+        
+        # VM1: 学习从 pc_noisy → pc_clean 的速度场
+        loss_vm1 = self.vm1.get_supervised_loss(pc_noisy, pc_mix, pc_clean)
+        
+        # VM2: 学习从 X_t1 → pc_clean 的修正速度场
+        # 其中 X_t1 是 VM1 一步更新后的中间状态
+        # 根据 coupled filtering 理论: VM2 应该学习修正 VM1 的预测误差
         with jt.no_grad():
-            v0 = self.vm1.decoder(c=self.vm1.encoder(pc_noisy).reshape(-1, self.vm1.encoder.embedding_dim)).reshape(B, Np, 3)
+            v0 = self.vm1.decoder(
+                c=self.vm1.encoder(pc_noisy).reshape(-1, self.vm1.encoder.embedding_dim)
+            ).reshape(B, Np, 3)
             X_t1 = pc_noisy + (1.0 / self.K) * v0
-        loss_vm2 = self.vm2.get_supervised_loss(pc_noisy, pc_mix, pc_clean)
+        
+        # VM2 基于中间状态 X_t1 学习，而非原始 pc_noisy
+        loss_vm2 = self.vm2.get_supervised_loss(X_t1, X_t1, pc_clean)
+        
         loss = loss_vm1 + loss_vm2
         return {"loss": loss}
 
