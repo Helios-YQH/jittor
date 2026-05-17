@@ -173,9 +173,6 @@ class VelocityModule(ModelSpec):
             else:
                 d = {
                     "pc_noisy": b.sampled_vertices_noisy, # (N, 3)
-                    "non": {
-                        "asset": b,  # 保存 asset 以便后续获取归一化参数
-                    }
                 }
                 if b.sampled_vertices is not None:
                     d["pc_clean"] = b.sampled_vertices
@@ -188,28 +185,27 @@ def farthest_point_sampling(pcls, num_pnts):
     return:
         sampled: (B, num_pnts, 3)
         indices: (B, num_pnts)
-    优化版本：避免 GPU->CPU 同步，保持所有操作在 GPU 上
     """
     B, N, _ = pcls.shape
-    device_pts = pcls
-    
-    dist = jt.ones((B, N)) * 1e10
-    farthest = jt.zeros((B,), dtype=jt.int32)
-    
-    all_indices = []
-    
-    for i in range(num_pnts):
-        all_indices.append(farthest.unsqueeze(1))
-        batch_idx = jt.arange(B)
-        centroid = device_pts[batch_idx, farthest]
-        d = ((device_pts - centroid.unsqueeze(1)) ** 2).sum(dim=-1)
-        dist = jt.minimum(dist, d)
-        farthest = jt.argmax(dist, dim=-1)
-    
-    indices = jt.concat(all_indices, dim=1)
-    batch_idx = jt.arange(B).unsqueeze(1).broadcast(indices.shape)
-    sampled = device_pts[batch_idx, indices]
-    
+    sampled = []
+    indices = []
+    for b in range(B):
+        pts = pcls[b]  # (N, 3)
+        selected = []
+        dist = jt.ones((N,)) * 1e10
+        farthest = 0
+        for i in range(num_pnts):
+            selected.append(farthest)
+            centroid = pts[farthest]  # (3,)
+            d = ((pts - centroid) ** 2).sum(dim=1)
+            dist = jt.minimum(dist, d)
+            farthest, _ = jt.argmax(dist, dim=-1)
+            farthest = farthest.item()
+        idx = jt.array(selected).int32()
+        sampled.append(pts[idx][None, ...])
+        indices.append(idx[None, ...])
+    sampled = jt.concat(sampled, dim=0)
+    indices = jt.concat(indices, dim=0)
     return sampled, indices
 
 def knn_points(x, y, k, chunk_size: int = 1024):
@@ -218,56 +214,39 @@ def knn_points(x, y, k, chunk_size: int = 1024):
     y: (B, N, 3)
     return:
         dist: (B, P, k)
-        idx:  (B, P, k)
-        nn:   (B, P, k, 3)
-    优化版本：向量化计算距离矩阵
+        idx: (B, P, k)
+        nn: (B, P, k, 3)
     """
     B, P, _ = x.shape
     _, N, _ = y.shape
     if k > N:
         k = N
-    
-    # 向量化计算距离矩阵 (B, P, N)
-    # 使用 ||x-y||^2 = ||x||^2 + ||y||^2 - 2*x·y
-    x_norm = (x ** 2).sum(dim=-1, keepdims=True)  # (B, P, 1)
-    y_norm = (y ** 2).sum(dim=-1, keepdims=True)  # (B, N, 1)
-    
-    # 分块计算以节省显存
-    if N * P > 10000000:  # 如果矩阵太大，分块处理
-        dist_k = []
-        idx_k = []
-        for b in range(B):
-            x_b = x[b]  # (P, 3)
-            y_b = y[b]  # (N, 3)
-            best_dist = None
-            best_idx = None
-            for start in range(0, N, chunk_size):
-                end = min(start + chunk_size, N)
-                y_chunk = y_b[start:end]  # (M, 3)
-                dist = ((x_b.unsqueeze(1) - y_chunk.unsqueeze(0)) ** 2).sum(-1)  # (P, M)
-                if best_dist is None:
-                    best_dist, best_idx = jt.topk(dist, k=k, dim=-1, largest=False)
-                    idx_chunk = jt.arange(start, end).int32().reshape(1, -1).broadcast(best_dist.shape)
-                    best_idx = idx_chunk.gather(dim=-1, index=best_idx)
-                else:
-                    idx_chunk = jt.arange(start, end).int32().reshape(1, -1).broadcast((P, end - start))
-                    cat_dist = jt.concat([best_dist, dist], dim=-1)
-                    cat_idx = jt.concat([best_idx, idx_chunk], dim=-1)
-                    best_dist, top_k = jt.topk(cat_dist, k=k, dim=-1, largest=False)
-                    best_idx = cat_idx.gather(dim=-1, index=top_k)
-            dist_k.append(best_dist)
-            idx_k.append(best_idx)
-        dist_k = jt.stack(dist_k, dim=0)
-        idx = jt.stack(idx_k, dim=0)
-    else:
-        # 直接计算完整距离矩阵
-        xy = jt.matmul(x, y.transpose(0, 2, 1))  # (B, P, N)
-        dist = x_norm + y_norm.transpose(0, 2, 1) - 2 * xy  # (B, P, N)
-        
-        # 获取 top-k 最小距离
-        dist_k, idx = jt.topk(dist, k=k, dim=-1, largest=False)
-    
-    # 收集最近邻点
+    dist_k = []
+    idx_k = []
+    for b in range(B):
+        x_b = x[b]  # (P, 3)
+        best_dist = None
+        best_idx = None
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            y_chunk = y[b, start:end]  # (M, 3)
+            dist = ((x_b.unsqueeze(1) - y_chunk.unsqueeze(0)) ** 2).sum(-1)  # (P, M)
+            if best_dist is None:
+                # initial chunk
+                best_dist, best_idx = jt.topk(dist, k=k, dim=-1, largest=False)
+                idx_chunk = jt.arange(start, end).int32().reshape(1, -1).broadcast(best_dist.shape)
+                best_idx = idx_chunk.gather(dim=-1, index=best_idx)
+            else:
+                # merge current chunk into running top-k
+                idx_chunk = jt.arange(start, end).int32().reshape(1, -1).broadcast((P, end - start))
+                cat_dist = jt.concat([best_dist, dist], dim=-1)
+                cat_idx = jt.concat([best_idx, idx_chunk], dim=-1)
+                best_dist, top_k = jt.topk(cat_dist, k=k, dim=-1, largest=False)
+                best_idx = cat_idx.gather(dim=-1, index=top_k)
+        dist_k.append(best_dist)
+        idx_k.append(best_idx)
+    dist_k = jt.stack(dist_k, dim=0)
+    idx = jt.stack(idx_k, dim=0)
     nn = []
     for b in range(B):
         nn.append(y[b][idx[b]])
@@ -277,7 +256,6 @@ def knn_points(x, y, k, chunk_size: int = 1024):
 def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_k=6, seed_k_alpha=1) -> jt.Var:
     """
     pcl_noisy: (N, 3)
-    优化版本：向量化操作替代 Python 循环
     """
     assert len(pcl_noisy.shape) == 2
     
@@ -288,6 +266,7 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
     seed_pnts, seed_idx = farthest_point_sampling(pcl_noisy, num_patches)
     patch_dists, point_idxs, patches = knn_points(seed_pnts, pcl_noisy, patch_size)
     
+    # keep everything in Jittor tensors (avoid numpy roundtrips)
     patches = patches[0]              # (P, M, 3)
     patch_dists = patch_dists[0]      # (P, M)
     point_idxs = point_idxs[0]        # (P, M)
@@ -297,14 +276,10 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
     
     patch_dists = patch_dists / (patch_dists[:, -1:].broadcast(patch_dists.shape) + 1e-8)
     
-    # 优化：使用 scatter 替代循环赋值
     all_dists = jt.ones((num_patches, N)) * 1e10
-    # 向量化 scatter 操作
-    all_dists = all_dists.scatter(
-        dim=1,
-        index=point_idxs,
-        src=patch_dists
-    )
+    
+    for i in range(num_patches):
+        all_dists[i][point_idxs[i]] = patch_dists[i]
         
     weights = jt.exp(-all_dists)
     best_weights_idx, _ = jt.argmax(weights, dim=0)
@@ -325,50 +300,24 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
     
     patches_denoised = jt.concat(patches_denoised, dim=0)
     patches_denoised = patches_denoised + seed_expand
-    
-    # 优化：向量化重建点云，避免双重 Python 循环
-    # 方法：使用 scatter 操作按权重分配点
-    
-    # 创建全局索引
-    global_indices = point_idxs.reshape(-1)  # (P*M,)
-    patch_indices = jt.arange(num_patches).unsqueeze(1).broadcast(point_idxs.shape).reshape(-1)  # (P*M,)
-    local_indices = jt.arange(patch_size).unsqueeze(0).broadcast(point_idxs.shape).reshape(-1)  # (P*M,)
-    
-    # 获取每个全局点对应的最佳 patch
-    best_patch_for_point = best_weights_idx[global_indices]  # (P*M,)
-    
-    # 判断该点是否属于这个 patch
-    mask = (best_patch_for_point == patch_indices)  # (P*M,)
-    
-    # 收集有效的赋值
-    valid_global_indices = global_indices[mask]
-    valid_patch_indices = patch_indices[mask]
-    valid_local_indices = local_indices[mask]
-    
-    # 展平 patches_denoised 用于索引
-    patches_flat = patches_denoised.reshape(-1, 3)  # (P*M, 3)
-    patch_offset = valid_patch_indices * patch_size
-    flat_indices = patch_offset + valid_local_indices
-    
-    # 使用 scatter 进行向量化赋值
+    # Robust reconstruction: fill output per global index using best_weights_idx and point_idxs
     pcl_out = jt.zeros((N, 3))
-    pcl_out = pcl_out.scatter(
-        dim=0,
-        index=valid_global_indices.unsqueeze(1).broadcast((valid_global_indices.shape[0], 3)),
-        src=patches_flat[flat_indices]
-    )
-    
-    # 处理未赋值的点
-    assigned_count = jt.zeros((N,), dtype=jt.int32)
-    assigned_count = assigned_count.scatter_add(
-        dim=0,
-        index=valid_global_indices,
-        src=jt.ones_like(valid_global_indices, dtype=jt.int32)
-    )
-    unassigned_mask = (assigned_count == 0)
-    
-    if unassigned_mask.sum().item() > 0:
+    assigned = jt.zeros((N,)).int32()
+    # Iterate patches and assign local points to their global indices when this patch is chosen
+    for pid in range(num_patches):
+        # get global indices for this patch (point_idxs[pid] shape: (M,))
+        globals_in_patch = point_idxs[pid]
+        local_num = globals_in_patch.shape[0]
+        for li in range(local_num):
+            g = int(globals_in_patch[li].item())
+            # check whether this global index chooses this patch
+            if int(best_weights_idx[g].item()) == pid:
+                pcl_out[g] = patches_denoised[pid, li]
+                assigned[g] = 1
+    # Fallback: any unassigned global points copy from input noisy cloud
+    unassigned_mask = (assigned == 0)
+    # avoid truth-value ambiguity for jt.Var
+    if int(unassigned_mask.sum().item()) > 0:
         noisy_points = pcl_noisy.squeeze(0)
         pcl_out[unassigned_mask] = noisy_points[unassigned_mask]
-    
     return pcl_out
