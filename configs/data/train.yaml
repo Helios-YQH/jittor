@@ -19,7 +19,7 @@ train_dataset:
 
 validate_dataset:
   shuffle: False
-  batch_size: 1
+  batch_size: 6
   num_workers: 8
   datapath:
     input_dataset_dir: ./dataset_train
