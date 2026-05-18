@@ -40,11 +40,18 @@ pip install point-cloud-utils  # 可选，用于精确 P2S 评测
    datalist/test.txt
    ```
 
-## 训练
+## 快速验证（推荐首次运行）
+使用小规模数据快速验证模型架构和代码是否正确，约 5 分钟完成：
+```bash
+python run.py --task configs/task/quick_train.yaml
+```
+该命令使用 200 个训练样本、4 的 batch size、5 个 epoch。正常运行时每个 epoch 的 loss 应逐步下降。若出现报错则说明环境或代码存在问题。
+
+## 正式训练
 ```bash
 python run.py --task configs/task/train_vm.yaml
 ```
-训练权重保存在 `experiments/vm/` 目录下。
+训练权重保存在 `experiments/vm/` 目录下，每个 epoch 保存一次，并在验证 loss 最低时额外保存 `checkpoint_best.pkl`。
 
 ## 自测评（推荐）
 在提交前，使用自测评脚本评估模型在预留验证集上的降噪质量：
