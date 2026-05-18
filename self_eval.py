@@ -53,7 +53,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_config(label, path):
+def load_config(label, path=None):
+    if path is None:
+        path = label
     if path.endswith('.yaml'):
         path = path.removesuffix('.yaml')
     path += '.yaml'
@@ -162,15 +164,23 @@ def main():
     # Load checkpoint
     load_ckpt = task.get('load_ckpt', None)
     if load_ckpt is None:
-        # Auto-find latest checkpoint in newest run subdirectory
+        # Auto-find latest checkpoint: prefer checkpoint_best.pkl in newest run subdirectory
         ckpt_root = os.path.join('experiments', components['model'])
-        run_dirs = sorted([d for d in os.listdir(ckpt_root) if os.path.isdir(os.path.join(ckpt_root, d))])
+        try:
+            run_dirs = sorted([d for d in os.listdir(ckpt_root) if os.path.isdir(os.path.join(ckpt_root, d))])
+        except FileNotFoundError:
+            run_dirs = []
         if run_dirs:
             latest_run = run_dirs[-1]
             ckpt_dir = os.path.join(ckpt_root, latest_run)
-            ckpt_files = sorted([f for f in os.listdir(ckpt_dir) if f.endswith('.pkl')])
-            if ckpt_files:
-                load_ckpt = os.path.join(ckpt_dir, ckpt_files[-1])
+            best_ckpt = os.path.join(ckpt_dir, 'checkpoint_best.pkl')
+            if os.path.isfile(best_ckpt):
+                load_ckpt = best_ckpt
+            else:
+                ckpt_files = sorted([f for f in os.listdir(ckpt_dir) if f.endswith('.pkl')])
+                if ckpt_files:
+                    load_ckpt = os.path.join(ckpt_dir, ckpt_files[-1])
+            if load_ckpt:
                 print(f"Auto-selected checkpoint: {load_ckpt}")
         if load_ckpt is None:
             print("ERROR: No checkpoint found and none specified.")
