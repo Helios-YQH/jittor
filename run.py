@@ -84,7 +84,10 @@ if __name__ == "__main__":
     else:
         model_config = load('model', os.path.join('configs/model', model_config))
         model = get_model(model_config=model_config, transform_config=transform_config)
-    
+        # broadcast parameters in distributed mode
+        if jt.mpi:
+            model.mpi_param_broadcast(root=0)
+
     train_transform = (Transform.parse(**transform_config.get('train_transform', {}))) if model is None else model.get_train_transform()
     validate_transform = (Transform.parse(**transform_config.get('validate_transform', {}))) if model is None else model.get_validate_transform()
     predict_transform = (Transform.parse(**transform_config.get('predict_transform', {}))) if model is None else model.get_predict_transform()

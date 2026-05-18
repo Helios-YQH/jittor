@@ -1,4 +1,5 @@
 from collections import defaultdict
+from datetime import datetime
 from jittor import optim
 from typing import Dict, List, Optional
 from tqdm import tqdm
@@ -67,11 +68,18 @@ class DummySystem():
         self.scheduler_config = trainer_config.get('scheduler') if isinstance(trainer_config, dict) else None
         self.best_val = None
         self._validation_loss = defaultdict(list)
-        # open log file
+        # open log file (per-run subdirectory)
         os.makedirs(self.ckpt_save_dir, exist_ok=True)
-        self.log_path = os.path.join(self.ckpt_save_dir, 'training.log')
+        run_name = trainer_config.get('run_name', '') if isinstance(trainer_config, dict) else ''
+        if not run_name:
+            run_name = f"{self.ckpt_save_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.run_name = run_name
+        self.run_dir = os.path.join(self.ckpt_save_dir, self.run_name)
+        os.makedirs(self.run_dir, exist_ok=True)
+        self.log_path = os.path.join(self.run_dir, 'training.log')
         try:
-            open(self.log_path, 'a').close()
+            with open(self.log_path, 'a') as f:
+                f.write(f"\n{'='*60}\nRun: {self.run_name} started at {datetime.now()}\n{'='*60}\n")
         except Exception:
             pass
     
@@ -145,13 +153,22 @@ class DummySystem():
                 mean_val = None
         except Exception:
             mean_val = None
-        # save best model
+        # all-reduce validation loss across distributed workers
+        if mean_val is not None and jt.mpi:
+            try:
+                mean_val = jt.array(mean_val).mpi_all_reduce("mean")
+                if isinstance(mean_val, jt.Var):
+                    mean_val = mean_val.item()
+            except Exception:
+                pass
+        # save best model (rank 0 only)
         try:
             if mean_val is not None:
                 if self.best_val is None or mean_val < self.best_val:
                     self.best_val = mean_val
-                    best_path = os.path.join(self.ckpt_save_dir, f'{self.ckpt_save_name}_best.pkl')
-                    self.model.save(best_path)
+                    best_path = os.path.join(self.run_dir, f'{self.ckpt_save_name}_best.pkl')
+                    if jt.mpi is None or jt.mpi.rank() == 0:
+                        self.model.save(best_path)
                     try:
                         with open(self.log_path, 'a') as f:
                             f.write(f"New best validation {mean_val}\n")
@@ -181,12 +198,16 @@ class DummySystem():
     def train(self):
         assert self.optimizer is not None, "optimizer is None, cannot train"
         self.model.set_predict(False)
+        # broadcast parameters in distributed mode
+        if jt.mpi:
+            self.model.mpi_param_broadcast(root=0)
+        disable_pbar = jt.mpi is not None and jt.mpi.rank() != 0
         for epoch in range(self.epochs):
             self.model.train()
             self.on_train_epoch_start()
             train_dataloader = self.dataset_module.train_dataloader()
             assert train_dataloader is not None, "train_dataloader is None"
-            pbar = tqdm(train_dataloader, total=len(train_dataloader)//train_dataloader.batch_size) # type: ignore
+            pbar = tqdm(train_dataloader, total=len(train_dataloader)//train_dataloader.batch_size, disable=disable_pbar) # type: ignore
             for batch in pbar:
                 self.on_train_batch_start()
                 loss = self.training_step(batch)
@@ -204,14 +225,14 @@ class DummySystem():
                 self.on_validation_epoch_start()
                 if isinstance(validate_dataloader, dict):
                     for name, dataloader in validate_dataloader.items():
-                        pbar = tqdm(dataloader, total=len(dataloader)//dataloader.batch_size)
+                        pbar = tqdm(dataloader, total=len(dataloader)//dataloader.batch_size, disable=disable_pbar)
                         for batch in pbar:
                             self.on_validation_batch_start()
                             loss = self.validation_step(batch)
                             pbar.set_description(f"Epoch {epoch}, Validate {name}, Loss: {_get_item(loss)}")
                             self.on_validation_batch_end()
                 else:
-                    pbar = tqdm(validate_dataloader, total=len(validate_dataloader)//validate_dataloader.batch_size)
+                    pbar = tqdm(validate_dataloader, total=len(validate_dataloader)//validate_dataloader.batch_size, disable=disable_pbar)
                     for batch in pbar:
                         self.on_validation_batch_start()
                         loss = self.validation_step(batch)
@@ -219,9 +240,10 @@ class DummySystem():
                         self.on_validation_batch_end()
                 self.on_validation_epoch_end()
             
-            checkpoint_path = os.path.join(self.ckpt_save_dir, f'{self.ckpt_save_name}_{epoch}.pkl')
-            os.makedirs(self.ckpt_save_dir, exist_ok=True)
-            self.model.save(checkpoint_path)
+            checkpoint_path = os.path.join(self.run_dir, f'{self.ckpt_save_name}_{epoch}.pkl')
+            os.makedirs(self.run_dir, exist_ok=True)
+            if jt.mpi is None or jt.mpi.rank() == 0:
+                self.model.save(checkpoint_path)
             # update scheduler if configured
             if self.scheduler_config is not None:
                 try:
@@ -239,11 +261,12 @@ class DummySystem():
                 except Exception:
                     pass
             # log epoch end
-            try:
-                with open(self.log_path, 'a') as f:
-                    f.write(f"Epoch {epoch} finished.\n")
-            except Exception:
-                pass
+            if jt.mpi is None or jt.mpi.rank() == 0:
+                try:
+                    with open(self.log_path, 'a') as f:
+                        f.write(f"Epoch {epoch} finished.\n")
+                except Exception:
+                    pass
     
     def predict(self):
         # only iterate once

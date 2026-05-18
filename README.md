@@ -48,10 +48,42 @@ python run.py --task configs/task/quick_train.yaml
 该命令使用 200 个训练样本、4 的 batch size、5 个 epoch。正常运行时每个 epoch 的 loss 应逐步下降。若出现报错则说明环境或代码存在问题。
 
 ## 正式训练
+
+### 单卡训练（快速调试）
 ```bash
 python run.py --task configs/task/train_vm.yaml
 ```
-训练权重保存在 `experiments/vm/` 目录下，每个 epoch 保存一次，并在验证 loss 最低时额外保存 `checkpoint_best.pkl`。
+
+### 分布式训练（推荐）
+```bash
+CUDA_VISIBLE_DEVICES="0,1,2,3,4,5" mpirun -np 6 python run.py --task configs/task/train_vm.yaml
+```
+- 框架自动完成数据分片和梯度同步，**无需修改代码**
+- 每个 MPI 进程接收 `总 batch_size / 进程数` 个样本
+- 仅 rank 0 保存 checkpoint 和输出日志，避免冲突
+
+### 多次训练管理
+
+训练权重保存在 `experiments/vm/` 目录下，每次运行时自动创建带时间戳的子目录，互不覆盖：
+
+```
+experiments/vm/
+  vm_20260518_143022/            ← 自动生成 run 子目录
+    checkpoint_0.pkl              ← 每个 epoch 保存一次
+    checkpoint_1.pkl
+    checkpoint_best.pkl           ← 验证 loss 最低时额外保存
+    training.log                  ← 仅包含本次运行的日志
+  vm_20260519_092115/            ← 另一次运行
+    checkpoint_0.pkl
+    ...
+    training.log
+```
+
+如需自定义运行名称，在 `configs/task/train_vm.yaml` 中设置：
+```yaml
+trainer:
+  run_name: my_experiment_1    # 留空则自动生成
+```
 
 ## 自测评（推荐）
 在提交前，使用自测评脚本评估模型在预留验证集上的降噪质量：
@@ -61,7 +93,11 @@ python self_eval.py --task configs/task/train_vm.yaml --split_ratio 0.1 --num_sa
 该脚本在验证集网格上采样 → 加噪 → 完整推理 → 计算 CD + P2S 得分，可帮助选择最佳 checkpoint。
 
 ## 推理（生成提交文件）
-修改 `configs/task/predict_vm.yaml` 中的 `load_ckpt` 为你的最佳权重路径，然后运行：
+修改 `configs/task/predict_vm.yaml` 中的 `load_ckpt` 为你的最佳权重路径（含 run 子目录），例如：
+```yaml
+load_ckpt: experiments/vm/vm_20260518_143022/checkpoint_best.pkl
+```
+然后运行：
 ```bash
 python run.py --task configs/task/predict_vm.yaml
 ```

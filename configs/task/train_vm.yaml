@@ -16,6 +16,7 @@ optimizer:
 
 trainer:
   epochs: 100
+  run_name: ""
   scheduler:
     type: step
     step_size: 30
