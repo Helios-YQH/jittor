@@ -63,7 +63,16 @@ def load_config(label, path=None):
 
 
 def sample_and_noisify(mesh_path, num_samples, noise_std):
-    """Sample points from mesh, normalize, add noise. Returns (noisy_pc, clean_pc, mesh_vertices, mesh_faces)."""
+    """Sample points from mesh, normalize, add noise.
+
+    Returns:
+        noisy_norm:  (N,3) noisy point cloud in normalized space
+        clean_norm:  (N,3) clean point cloud in normalized space
+        center:      (3,)  normalization center (for de-normalization)
+        scale:       float normalization scale
+        vertices:    (V,3) raw mesh vertices (world space)
+        faces:       (F,3) mesh faces
+    """
     import trimesh
     mesh = trimesh.load(mesh_path, process=False)
     if isinstance(mesh, trimesh.Scene):
@@ -80,13 +89,15 @@ def sample_and_noisify(mesh_path, num_samples, noise_std):
         num_vertex_samples=min(1024, num_samples),
     )
 
-    # Normalize (same as AugmentNormalizePC)
+    # Normalize to unit sphere
     center = (sampled.max(axis=0) + sampled.min(axis=0)) / 2.0
     sampled_centered = sampled - center
     scale = np.sqrt((sampled_centered ** 2).sum(axis=1)).max()
+    if scale < 1e-12:
+        scale = 1.0
     clean_norm = sampled_centered / scale
 
-    # Add noise
+    # Add noise in normalized space
     noise = np.random.laplace(0, noise_std, size=clean_norm.shape)
     noisy_norm = clean_norm + noise
 
@@ -94,7 +105,14 @@ def sample_and_noisify(mesh_path, num_samples, noise_std):
 
 
 def run_single_eval(args_tuple):
-    """Evaluate a single mesh: sample, denoise, compute metrics."""
+    """Evaluate a single mesh: sample, denoise, compute metrics.
+
+    Flow matches official evaluation:
+      1. Sample points from mesh, normalize to unit sphere
+      2. Add noise → denoise in normalized space (patch_based_denoise)
+      3. De-normalize all point clouds back to world space
+      4. Compute CD and P2S with world-space inputs (metric functions normalize internally)
+    """
     mesh_path, model, num_samples, noise_std, patch_size, seed_k = args_tuple
 
     result = {"path": mesh_path, "cd_pred": None, "cd_noisy": None,
@@ -105,27 +123,33 @@ def run_single_eval(args_tuple):
             mesh_path, num_samples, noise_std
         )
 
-        # Denoise using patch_based_denoise
+        # Denoise in normalized space
         pc_next = jt.array(noisy_norm.astype(np.float32))
-        # Multiple repeats for thorough denoising
         for _ in range(3):
-            pc_next = patch_based_denoise(
+            result_pc = patch_based_denoise(
                 model=model,
                 pcl_noisy=pc_next,
                 patch_size=patch_size,
                 seed_k=seed_k,
                 seed_k_alpha=1,
             )
+            if result_pc is not None:
+                pc_next = result_pc
         denoised_norm = pc_next.numpy() if isinstance(pc_next, jt.Var) else pc_next
 
-        # Denormalize before metric computation? No — evaluate in normalized space
-        # for consistency with competition evaluation
-        cd_pred = chamfer_distance(denoised_norm, clean_norm, normalize=True)
-        cd_noisy = chamfer_distance(noisy_norm, clean_norm, normalize=True)
+        # De-normalize to world space for consistent metric normalization
+        clean_world = clean_norm * scale + center
+        noisy_world = noisy_norm * scale + center
+        denoised_world = denoised_norm * scale + center
 
+        # CD: normalize=True uses clean_world as reference (unit-sphere normalization)
+        cd_pred = chamfer_distance(denoised_world, clean_world, normalize=True)
+        cd_noisy = chamfer_distance(noisy_world, clean_world, normalize=True)
+
+        # P2S: normalize_ref_pc=clean_world applies same transform to pred/noisy and mesh vertices
         if mv is not None and mf is not None:
-            p2s_pred = point_to_surface_distance(denoised_norm, mv, mf, normalize_ref_pc=clean_norm)
-            p2s_noisy = point_to_surface_distance(noisy_norm, mv, mf, normalize_ref_pc=clean_norm)
+            p2s_pred = point_to_surface_distance(denoised_world, mv, mf, normalize_ref_pc=clean_world)
+            p2s_noisy = point_to_surface_distance(noisy_world, mv, mf, normalize_ref_pc=clean_world)
         else:
             p2s_pred = None
             p2s_noisy = None
