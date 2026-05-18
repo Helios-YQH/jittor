@@ -1,5 +1,6 @@
 mode: train
 debug: False
+# load_ckpt: experiments/vm/checkpoint_20260518_190726/checkpoint_best.pkl  # uncomment to resume from previous best
 
 components:
   data: train
