@@ -37,11 +37,11 @@ class CoupledVelocityModule(ModelSpec):
         loss2 = self.vm2.get_supervised_loss(pc_noisy, pc_mix, pc_clean)
         return 0.5 * (loss1 + loss2)
 
-    def deterministic_euler_step(self, pcl_noisy, N=3):
+    def deterministic_euler_step(self, pcl_noisy, num_steps=3):
         B, P, d = pcl_noisy.shape
         pcl = pcl_noisy
-        T = N * self.K
-        for _ in range(N):
+        T = num_steps * self.K
+        for _ in range(num_steps):
             # vm1
             feat = self.vm1.encoder(pcl)
             v0 = self.vm1.decoder(c=feat.reshape(-1, feat.shape[2])).reshape(B, P, d)
