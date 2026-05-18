@@ -176,19 +176,9 @@ def main():
     task = load_config(args.task)
     components = task['components']
 
-    # Load model config
-    model_config = load_config('model', os.path.join('configs/model', components['model']))
-    transform_config = load_config('transform', os.path.join('configs/transform', components['transform']))
-
-    # Build model
-    model = get_model(model_config=model_config, transform_config=transform_config)
-    model.set_predict(True)
-    model.eval()
-
-    # Load checkpoint
+    # Load checkpoint: jt.load preserves full model structure (submodules like vm1/vm2)
     load_ckpt = task.get('load_ckpt', None)
     if load_ckpt is None:
-        # Auto-find latest checkpoint: prefer checkpoint_best.pkl in newest run subdirectory
         ckpt_root = os.path.join('experiments', components['model'])
         try:
             run_dirs = sorted([d for d in os.listdir(ckpt_root) if os.path.isdir(os.path.join(ckpt_root, d))])
@@ -209,7 +199,9 @@ def main():
         if load_ckpt is None:
             print("ERROR: No checkpoint found and none specified.")
             sys.exit(1)
-    model.load(load_ckpt)
+    model = jt.load(load_ckpt)
+    model.set_predict(True)
+    model.eval()
     print(f"Loaded checkpoint: {load_ckpt}")
 
     # Load data config to get validation mesh paths
