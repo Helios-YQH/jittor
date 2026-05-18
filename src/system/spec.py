@@ -16,6 +16,21 @@ def _get_item(x):
         return x.item()
     return x
 
+
+def _get_mpi_rank():
+    """Get MPI rank via env var (OpenMPI standard). Returns 0 if not in MPI mode."""
+    if jt.mpi is None:
+        return 0
+    try:
+        return int(os.environ.get('OMPI_COMM_WORLD_RANK', 0))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _is_main_process():
+    """True on rank 0 or single-GPU."""
+    return _get_mpi_rank() == 0
+
 def get_optimizer(optimizer_config, model):
     __target__ = optimizer_config.pop('__target__')
     MAPPING = {
@@ -167,7 +182,7 @@ class DummySystem():
                 if self.best_val is None or mean_val < self.best_val:
                     self.best_val = mean_val
                     best_path = os.path.join(self.run_dir, f'{self.ckpt_save_name}_best.pkl')
-                    if jt.mpi is None or jt.mpi.rank() == 0:
+                    if _is_main_process():
                         self.model.save(best_path)
                     try:
                         with open(self.log_path, 'a') as f:
@@ -201,7 +216,7 @@ class DummySystem():
         # broadcast parameters in distributed mode
         if jt.mpi:
             self.model.mpi_param_broadcast(root=0)
-        disable_pbar = jt.mpi is not None and jt.mpi.rank() != 0
+        disable_pbar = not _is_main_process()
         for epoch in range(self.epochs):
             self.model.train()
             self.on_train_epoch_start()
@@ -242,7 +257,7 @@ class DummySystem():
             
             checkpoint_path = os.path.join(self.run_dir, f'{self.ckpt_save_name}_{epoch}.pkl')
             os.makedirs(self.run_dir, exist_ok=True)
-            if jt.mpi is None or jt.mpi.rank() == 0:
+            if _is_main_process():
                 self.model.save(checkpoint_path)
             # update scheduler if configured
             if self.scheduler_config is not None:
@@ -261,7 +276,7 @@ class DummySystem():
                 except Exception:
                     pass
             # log epoch end
-            if jt.mpi is None or jt.mpi.rank() == 0:
+            if _is_main_process():
                 try:
                     with open(self.log_path, 'a') as f:
                         f.write(f"Epoch {epoch} finished.\n")
