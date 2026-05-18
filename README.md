@@ -71,7 +71,7 @@ experiments/vm/
   checkpoint_20260518_143022/      ← 自动生成 run 子目录（东八区时间）
     checkpoint_0.pkl               ← 每个 epoch 保存一次
     checkpoint_1.pkl
-    checkpoint_best.pkl            ← 验证 loss 最低时额外保存
+    checkpoint_best.pkl            ← 验证 loss 最低时额外保存（最佳模型）
     training.log                   ← 仅包含本次运行的日志
     training_curve.png             ← 训练曲线图（每 epoch 更新）
   checkpoint_20260519_092115/      ← 另一次运行
@@ -80,10 +80,13 @@ experiments/vm/
     training.log
 ```
 
+**最佳模型机制（`checkpoint_best.pkl`）：** 每 epoch 结束时在验证集上计算 loss。如果当前 epoch 的 mean validation loss 为历史最低，则将模型保存为 `checkpoint_best.pkl`，并记录 `★` 标记。早停（early stopping）若开启（`patience: 10`），连续 `patience` 个 epoch 无改善则自动终止训练。
+
 如需自定义运行名称，在 `configs/task/train_vm.yaml` 中设置：
 ```yaml
 trainer:
   run_name: my_experiment_1    # 留空则自动生成时间戳
+  patience: 10                 # 可选：开启早停
 ```
 
 ### 断点续训
@@ -102,14 +105,32 @@ load_ckpt: experiments/vm/checkpoint_20260518_143022/checkpoint_best.pkl
 ## 自测评（推荐）
 在提交前，使用自测评脚本评估模型在预留验证集上的降噪质量：
 ```bash
-python self_eval.py --task configs/task/train_vm.yaml --split_ratio 0.1 --num_samples 50000
+python self_eval.py --task configs/task/train_vm.yaml --split_ratio 0.1 --num_samples 10000
 ```
-该脚本在验证集网格上采样 → 加噪 → 完整推理 → 计算 CD + P2S 得分，可帮助选择最佳 checkpoint。
+该脚本在验证集网格上采样 → 加噪 → 完整推理 → 计算 CD + P2S 得分，可帮助选择最佳 checkpoint。输出示例：
+
+```
+============================================================
+  Self-Evaluation Results
+============================================================
+  Samples evaluated: 10
+  Errors:            0
+  Noise std:         0.0125
+------------------------------------------------------------
+  CD  (pred/noisy):  0.000668 / 0.000548
+  Mean CD score:     1.13 / 100
+  P2S (pred/noisy):  0.000073 / 0.000221
+  Mean P2S score:    66.50 / 100
+  Final score:       33.81 / 100
+============================================================
+```
+
+- `num_samples` 控制每网格采样点数（默认 10000，越大越准但显存消耗高，24GB 卡建议不超过 20000）
+- 训练早期 CD 提升慢于 P2S（先学表面法向，后学切向分布），属于正常现象
 
 自测评与训练的 checkpoint 复用同一套加载机制：
 - 在 `train_vm.yaml` 中设置 `load_ckpt` 指定要评估的权重路径
 - 留空则自动选择 `experiments/vm/` 下最新 run 子目录中的 `checkpoint_best.pkl`
-- 加载流程：`get_model()` 构建结构 → `model.load()` 载入权重，保证子模块引用正确
 
 ## 推理（生成提交文件）
 修改 `configs/task/predict_vm.yaml` 中的 `load_ckpt` 为你的最佳权重路径（含 run 子目录），例如：
