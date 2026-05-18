@@ -240,8 +240,11 @@ def main():
 
     # Run evaluation (single-process to avoid Jittor GPU sharing issues)
     results = []
-    for t in tqdm(tasks):
-        results.append(run_single_eval(t))
+    for i, t in enumerate(tqdm(tasks)):
+        r = run_single_eval(t)
+        results.append(r)
+        if r.get("error") and i < 5:  # print first 5 errors
+            print(f"\n  [ERROR #{i}] {r['error']}")
 
     # Aggregate
     cd_scores = []
