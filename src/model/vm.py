@@ -234,7 +234,7 @@ def knn_points(x, y, k, chunk_size: int = 1024):
             if best_dist is None:
                 # initial chunk
                 best_dist, best_idx = jt.topk(dist, k=k, dim=-1, largest=False)
-                idx_chunk = jt.arange(start, end).int32().reshape(1, -1).broadcast(best_dist.shape)
+                idx_chunk = jt.arange(start, end).int32().reshape(1, -1).broadcast((P, end - start))
                 best_idx = idx_chunk.gather(dim=-1, index=best_idx)
             else:
                 # merge current chunk into running top-k
