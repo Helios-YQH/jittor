@@ -1,6 +1,6 @@
 import jittor as jt
 from .spec import ModelSpec
-from .vm import VelocityModule
+from .vm import VelocityModule, patch_based_denoise
 from .distance_module import DistanceModule
 from ..data.asset import Asset
 from typing import Dict, List
@@ -68,11 +68,10 @@ class CoupledVelocityModule(ModelSpec):
         loss_vm1 = self.vm1.get_supervised_loss(pc_noisy, pc_mix, pc_clean)
         
         # VM2: 学习从 X_t1 → pc_clean 的修正速度场
-        # 其中 X_t1 是 VM1 一步更新后的中间状态
-        # 根据 coupled filtering 理论: VM2 应该学习修正 VM1 的预测误差
+        # 使用 pc_mix 提取特征以保证与 VM1 训练时特征分布一致
         with jt.no_grad():
             v0 = self.vm1.decoder(
-                c=self.vm1.encoder(pc_noisy).reshape(-1, self.vm1.encoder.embedding_dim)
+                c=self.vm1.encoder(pc_mix).reshape(-1, self.vm1.encoder.embedding_dim)
             ).reshape(B, Np, 3)
             X_t1 = pc_noisy + (1.0 / self.K) * v0
         
@@ -87,48 +86,45 @@ class CoupledVelocityModule(ModelSpec):
 
     @jt.no_grad()
     def predict_step(self, batch: Dict) -> List[Dict]:
-        # Similar to VelocityModule.predict_step but using coupled filtering and repeats
         pc_noisy_batch = batch['pc_noisy']
         assert pc_noisy_batch.ndim == 3
         res = []
         for i, pc_noisy in enumerate(pc_noisy_batch):
             pc_next = pc_noisy
-            # estimate noise level based on neighbor distances (simple heuristic)
-            # compute average nearest neighbor distance
-            from jittor import nn
             P = pc_next.shape[0]
-            # use a small k for speed
-            k = min(8, P-1)
-            # compute pairwise dist to k neighbors using self.vm1.encoder.get_edge_index? fallback to knn
-            # here simple heuristic: sample subset
-            sample_idx = jt.arange(0, P, max(1, P//100))
+            k = min(8, P - 1)
+            step = max(1, P // 100)
+            sample_idx = jt.arange(0, P, step)
             subset = pc_next[sample_idx]
-            # compute kNN distances
             dists = ((subset.unsqueeze(1) - pc_next.unsqueeze(0)) ** 2).sum(-1)
-            dists_k, _ = jt.topk(dists, k=k+1, dim=-1, largest=False)
-            # ignore self (first col)
-            avg_dist = dists_k[:, 1:].mean()
-            num_repeat = 1
-            if avg_dist.item() > 0.03:
+            d_k, _ = jt.topk(dists, k=k + 1, dim=-1, largest=False)
+            avg_dist = d_k[:, 1:].mean().item()
+            if avg_dist > 0.03:
+                num_repeat = 4
+            elif avg_dist > 0.02:
                 num_repeat = 3
-            elif avg_dist.item() > 0.02:
+            else:
                 num_repeat = 2
             for _ in range(num_repeat):
-                pc_next = self.deterministic_euler_step(pc_next.unsqueeze(0), N=3).squeeze(0)
-            
-            # 反归一化
+                result = patch_based_denoise(
+                    model=self,
+                    pcl_noisy=pc_next,
+                    patch_size=1000,
+                    seed_k=6,
+                    seed_k_alpha=1,
+                )
+                if result is not None:
+                    pc_next = result
             asset = batch['asset'][i]
             if asset.meta is not None and 'normalize_center' in asset.meta and 'normalize_scale' in asset.meta:
                 center = asset.meta['normalize_center']
                 scale = asset.meta['normalize_scale']
-                # 转换为 numpy 进行反归一化
                 if isinstance(pc_next, jt.Var):
                     pc_next_np = pc_next.numpy()
                 else:
                     pc_next_np = pc_next
                 pc_next_np = pc_next_np * scale + center
                 pc_next = pc_next_np
-            
             res.append({"pc_denoised": pc_next})
         return res
 

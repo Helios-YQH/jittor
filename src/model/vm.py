@@ -300,24 +300,22 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
     
     patches_denoised = jt.concat(patches_denoised, dim=0)
     patches_denoised = patches_denoised + seed_expand
-    # Robust reconstruction: fill output per global index using best_weights_idx and point_idxs
+    # Vectorized reconstruction: fill output per global index using best_weights_idx and point_idxs
     pcl_out = jt.zeros((N, 3))
     assigned = jt.zeros((N,)).int32()
-    # Iterate patches and assign local points to their global indices when this patch is chosen
     for pid in range(num_patches):
-        # get global indices for this patch (point_idxs[pid] shape: (M,))
-        globals_in_patch = point_idxs[pid]
-        local_num = globals_in_patch.shape[0]
-        for li in range(local_num):
-            g = int(globals_in_patch[li].item())
-            # check whether this global index chooses this patch
-            if int(best_weights_idx[g].item()) == pid:
-                pcl_out[g] = patches_denoised[pid, li]
-                assigned[g] = 1
+        gidx = point_idxs[pid]
+        mask = jt.equal(best_weights_idx[gidx], pid)
+        if mask.int32().sum().item() > 0:
+            local_sel = jt.nonzero(mask)
+            if local_sel.ndim > 1:
+                local_sel = local_sel.reshape(-1)
+            global_sel = gidx[local_sel]
+            pcl_out[global_sel] = patches_denoised[pid][local_sel]
+            assigned[global_sel] = 1
     # Fallback: any unassigned global points copy from input noisy cloud
     unassigned_mask = (assigned == 0)
-    # avoid truth-value ambiguity for jt.Var
-    if int(unassigned_mask.sum().item()) > 0:
+    if unassigned_mask.int32().sum().item() > 0:
         noisy_points = pcl_noisy.squeeze(0)
         pcl_out[unassigned_mask] = noisy_points[unassigned_mask]
     return pcl_out
