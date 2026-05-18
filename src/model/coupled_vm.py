@@ -17,9 +17,14 @@ class CoupledVelocityModule(ModelSpec):
         self.vm2 = VelocityModule(model_config, transform_config)
         # optional distance module
         self.distance_module = DistanceModule(input_dim=self.vm1.encoder.embedding_dim)
-        # reuse encoder/decoder shortcuts for compatibility
-        self.encoder = self.vm1.encoder
-        self.decoder = self.vm1.decoder
+
+    @property
+    def encoder(self):
+        return self.vm1.encoder
+
+    @property
+    def decoder(self):
+        return self.vm1.decoder
 
     def set_predict(self, is_predict: bool):
         super().set_predict(is_predict)

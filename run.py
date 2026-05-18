@@ -88,6 +88,11 @@ if __name__ == "__main__":
         if jt.mpi:
             model.mpi_param_broadcast(root=0)
 
+    load_ckpt = task.get('load_ckpt', None)
+    if load_ckpt is not None and model is not None:
+        print(f"Loading checkpoint: {load_ckpt}")
+        model.load(load_ckpt)
+
     train_transform = (Transform.parse(**transform_config.get('train_transform', {}))) if model is None else model.get_train_transform()
     validate_transform = (Transform.parse(**transform_config.get('validate_transform', {}))) if model is None else model.get_validate_transform()
     predict_transform = (Transform.parse(**transform_config.get('predict_transform', {}))) if model is None else model.get_predict_transform()
@@ -101,16 +106,10 @@ if __name__ == "__main__":
         predict_transform=predict_transform,
         debug=task.get('debug', False),
     )
-    
+
     optimizer_config = task.get('optimizer', None)
     loss_config = task.get('loss', None)
     trainer_config = task.get('trainer', None)
-    
-    # load ckpt
-    load_ckpt = task.get('load_ckpt', None)
-    
-    if load_ckpt is not None and model is not None:
-        model.load(load_ckpt)
     
     # get writer
     writer_config = task.get('writer', None)

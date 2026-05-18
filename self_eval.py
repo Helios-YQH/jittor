@@ -176,7 +176,12 @@ def main():
     task = load_config(args.task)
     components = task['components']
 
-    # Load checkpoint: jt.load preserves full model structure (submodules like vm1/vm2)
+    # Build model from config first (sets up shared references correctly)
+    model_config = load_config('model', os.path.join('configs/model', components['model']))
+    transform_config = load_config('transform', os.path.join('configs/transform', components['transform']))
+    model = get_model(model_config=model_config, transform_config=transform_config)
+
+    # Find checkpoint to load
     load_ckpt = task.get('load_ckpt', None)
     if load_ckpt is None:
         ckpt_root = os.path.join('experiments', components['model'])
@@ -199,7 +204,8 @@ def main():
         if load_ckpt is None:
             print("ERROR: No checkpoint found and none specified.")
             sys.exit(1)
-    model = jt.load(load_ckpt)
+
+    model.load(load_ckpt)
     model.set_predict(True)
     model.eval()
     print(f"Loaded checkpoint: {load_ckpt}")

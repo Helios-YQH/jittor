@@ -68,12 +68,13 @@ CUDA_VISIBLE_DEVICES="0,1,2,3,4,5" mpirun -np 6 python run.py --task configs/tas
 
 ```
 experiments/vm/
-  vm_20260518_143022/            ← 自动生成 run 子目录
-    checkpoint_0.pkl              ← 每个 epoch 保存一次
+  checkpoint_20260518_143022/      ← 自动生成 run 子目录（东八区时间）
+    checkpoint_0.pkl               ← 每个 epoch 保存一次
     checkpoint_1.pkl
-    checkpoint_best.pkl           ← 验证 loss 最低时额外保存
-    training.log                  ← 仅包含本次运行的日志
-  vm_20260519_092115/            ← 另一次运行
+    checkpoint_best.pkl            ← 验证 loss 最低时额外保存
+    training.log                   ← 仅包含本次运行的日志
+    training_curve.png             ← 训练曲线图（每 epoch 更新）
+  checkpoint_20260519_092115/      ← 另一次运行
     checkpoint_0.pkl
     ...
     training.log
@@ -82,8 +83,21 @@ experiments/vm/
 如需自定义运行名称，在 `configs/task/train_vm.yaml` 中设置：
 ```yaml
 trainer:
-  run_name: my_experiment_1    # 留空则自动生成
+  run_name: my_experiment_1    # 留空则自动生成时间戳
 ```
+
+### 断点续训
+
+在 `configs/task/train_vm.yaml` 中指定 `load_ckpt` 即可从之前的 checkpoint 继续训练：
+
+```yaml
+load_ckpt: experiments/vm/checkpoint_20260518_143022/checkpoint_best.pkl
+```
+
+- 留空（或注释掉）则从头训练，模型结构从 config 随机初始化
+- 指定路径后：先根据 config 构建模型结构（保证子模块引用正确），再 `model.load()` 载入权重
+- optimizer 状态**不保留**（学习率等从 config 重新初始化）
+- 支持分布式训练、early-stopping、可视化等全部特性
 
 ## 自测评（推荐）
 在提交前，使用自测评脚本评估模型在预留验证集上的降噪质量：
@@ -92,10 +106,15 @@ python self_eval.py --task configs/task/train_vm.yaml --split_ratio 0.1 --num_sa
 ```
 该脚本在验证集网格上采样 → 加噪 → 完整推理 → 计算 CD + P2S 得分，可帮助选择最佳 checkpoint。
 
+自测评与训练的 checkpoint 复用同一套加载机制：
+- 在 `train_vm.yaml` 中设置 `load_ckpt` 指定要评估的权重路径
+- 留空则自动选择 `experiments/vm/` 下最新 run 子目录中的 `checkpoint_best.pkl`
+- 加载流程：`get_model()` 构建结构 → `model.load()` 载入权重，保证子模块引用正确
+
 ## 推理（生成提交文件）
 修改 `configs/task/predict_vm.yaml` 中的 `load_ckpt` 为你的最佳权重路径（含 run 子目录），例如：
 ```yaml
-load_ckpt: experiments/vm/vm_20260518_143022/checkpoint_best.pkl
+load_ckpt: experiments/vm/checkpoint_20260518_143022/checkpoint_best.pkl
 ```
 然后运行：
 ```bash
