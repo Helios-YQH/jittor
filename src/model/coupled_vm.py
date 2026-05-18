@@ -33,7 +33,6 @@ class CoupledVelocityModule(ModelSpec):
         return 0.5 * (loss1 + loss2)
 
     def deterministic_euler_step(self, pcl_noisy, N=3):
-        # Coupled filtering per paper: for n in N: apply vm1 then vm2 with distance scaling
         B, P, d = pcl_noisy.shape
         pcl = pcl_noisy
         T = N * self.K
@@ -45,15 +44,7 @@ class CoupledVelocityModule(ModelSpec):
             # vm2
             feat2 = self.vm2.encoder(pcl)
             v1 = self.vm2.decoder(c=feat2.reshape(-1, feat2.shape[2])).reshape(B, P, d)
-            # distance scaling
-            d_scalar = self.distance_module(feat2)
-            # ensure shape
-            if isinstance(d_scalar, jt.Var):
-                # d_scalar: (B, P, 1)
-                step = d_scalar / T
-                pcl = pcl + step * v1
-            else:
-                pcl = pcl + (1.0 / T) * v1
+            pcl = pcl + (1.0 / T) * v1
         return pcl
 
     def training_step(self, batch: Dict) -> Dict:
