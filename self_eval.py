@@ -44,7 +44,7 @@ def parse_args():
     parser.add_argument("--task", type=str, required=True, help="Task config (same as training)")
     parser.add_argument("--split_ratio", type=float, default=0.1,
                         help="Fraction of training data to reserve for self-eval (default: 0.1)")
-    parser.add_argument("--num_samples", type=int, default=50000,
+    parser.add_argument("--num_samples", type=int, default=10000,
                         help="Number of points to sample per mesh")
     parser.add_argument("--noise_std", type=float, default=None,
                         help="Noise std for evaluation (default: mid of training range)")
@@ -245,6 +245,10 @@ def main():
             print(f"\n  [ERROR #{i}] {r['error']}")
 
     # Aggregate
+    cd_pred_vals = []
+    cd_noisy_vals = []
+    p2s_pred_vals = []
+    p2s_noisy_vals = []
     cd_scores = []
     p2s_scores = []
     errors = 0
@@ -254,8 +258,12 @@ def main():
             errors += 1
             continue
         if r["cd_pred"] is not None and r["cd_noisy"] is not None:
+            cd_pred_vals.append(r["cd_pred"])
+            cd_noisy_vals.append(r["cd_noisy"])
             cd_scores.append(metric_to_score(r["cd_pred"], r["cd_noisy"]))
         if r["p2s_pred"] is not None and r["p2s_noisy"] is not None:
+            p2s_pred_vals.append(r["p2s_pred"])
+            p2s_noisy_vals.append(r["p2s_noisy"])
             p2s_scores.append(metric_to_score(r["p2s_pred"], r["p2s_noisy"]))
 
     # Report
@@ -266,9 +274,11 @@ def main():
     print(f"  Errors:            {errors}")
     print(f"  Noise std:         {noise_std}")
     print("-" * 60)
-    if cd_scores:
+    if cd_pred_vals:
+        print(f"  CD  (pred/noisy):  {np.mean(cd_pred_vals):.6f} / {np.mean(cd_noisy_vals):.6f}")
         print(f"  Mean CD score:     {np.mean(cd_scores):.2f} / 100")
-    if p2s_scores:
+    if p2s_pred_vals:
+        print(f"  P2S (pred/noisy):  {np.mean(p2s_pred_vals):.6f} / {np.mean(p2s_noisy_vals):.6f}")
         print(f"  Mean P2S score:    {np.mean(p2s_scores):.2f} / 100")
     if cd_scores and p2s_scores:
         final = 0.5 * np.mean(cd_scores) + 0.5 * np.mean(p2s_scores)

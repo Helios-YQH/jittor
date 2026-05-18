@@ -265,7 +265,8 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
     
     seed_pnts, seed_idx = farthest_point_sampling(pcl_noisy, num_patches)
     patch_dists, point_idxs, patches = knn_points(seed_pnts, pcl_noisy, patch_size)
-    
+    jt.sync_all()  # execute KNN and release intermediate GPU buffers
+
     # keep everything in Jittor tensors (avoid numpy roundtrips)
     patches = patches[0]              # (P, M, 3)
     patch_dists = patch_dists[0]      # (P, M)
@@ -288,6 +289,8 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
     i = 0
     patch_step = int(ceil(N / (seed_k_alpha * patch_size)))
     assert patch_step > 0
+    # cap patches per iteration to limit GPU memory (edge graph: patch_step * 1000 * k edges)
+    patch_step = min(patch_step, 8)
     while i < num_patches:
         curr = patches[i:i+patch_step]
         try:
@@ -295,6 +298,9 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
         except Exception as e:
             print("Denoise error:", e)
             return None
+        # detach from computation graph to prevent GPU memory accumulation
+        if isinstance(out, jt.Var):
+            out = jt.array(out.numpy())
         patches_denoised.append(out)
         i += patch_step
     
