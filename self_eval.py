@@ -53,7 +53,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_config(path):
+def load_config(path, label=''):
     if path.endswith('.yaml'):
         path = path.removesuffix('.yaml')
     path += '.yaml'
