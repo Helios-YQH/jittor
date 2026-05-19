@@ -120,10 +120,11 @@ def main():
     model.eval()
     print(f"Loaded checkpoint: {load_ckpt}")
 
-    data_config = load_config('data', os.path.join('configs/data', components['data']))
-    validate_cfg = data_config.get('validate_dataset')
+    # Load training data config for validation mesh paths
+    train_data_config = load_config('data', 'configs/data/train')
+    validate_cfg = train_data_config.get('validate_dataset', None)
     if validate_cfg is None:
-        print("ERROR: No validate_dataset in data config")
+        print("ERROR: No validate_dataset in configs/data/train.yaml")
         sys.exit(1)
 
     datapath = Datapath.parse(**validate_cfg['datapath'])
