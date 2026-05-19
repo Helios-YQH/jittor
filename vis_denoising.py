@@ -24,7 +24,6 @@ from src.data.asset import Asset
 from src.data.datapath import Datapath
 from src.model.parse import get_model
 from src.data.transform import Transform
-from src.model.vm import patch_based_denoise
 from src.data.utils import sample_vertex_groups
 
 from evaluate import chamfer_distance, point_to_surface_distance, load_mesh_vf
@@ -78,15 +77,16 @@ def sample_and_noisify(mesh_path, num_samples, noise_std):
 
 
 def denoise_inference(model, noisy_norm):
-    pc_next = jt.array(noisy_norm.astype(np.float32))
-    for _ in range(3):
-        result_pc = patch_based_denoise(
-            model=model, pcl_noisy=pc_next,
-            patch_size=1000, seed_k=6, seed_k_alpha=1,
-        )
-        if result_pc is not None:
-            pc_next = result_pc
-    return pc_next.numpy() if isinstance(pc_next, jt.Var) else pc_next
+    """Denoise using model.predict_step (same as official pipeline)."""
+    pc_var = jt.array(noisy_norm.astype(np.float32)).unsqueeze(0)  # (1, N, 3)
+    from src.data.asset import Asset
+    batch = {'pc_noisy': pc_var, 'asset': [Asset()]}
+    with jt.no_grad():
+        pred_list = model.predict_step(batch)
+    result = pred_list[0]['pc_denoised']
+    if isinstance(result, jt.Var):
+        return result.numpy()
+    return np.asarray(result)
 
 
 def compute_point_errors(denoised, clean, k=1):

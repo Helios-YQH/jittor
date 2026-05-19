@@ -28,7 +28,6 @@ from src.data.augment import AugmentSample, AugmentNormalizePC, AugmentAddNoise
 from src.data.datapath import Datapath, NpyLazyAsset
 from src.model.parse import get_model
 from src.data.transform import Transform
-from src.model.vm import patch_based_denoise
 
 # Reuse evaluation functions from evaluate.py
 from evaluate import (
@@ -107,13 +106,9 @@ def sample_and_noisify(mesh_path, num_samples, noise_std):
 def run_single_eval(args_tuple):
     """Evaluate a single mesh: sample, denoise, compute metrics.
 
-    Flow matches official evaluation:
-      1. Sample points from mesh, normalize to unit sphere
-      2. Add noise → denoise in normalized space (patch_based_denoise)
-      3. De-normalize all point clouds back to world space
-      4. Compute CD and P2S with world-space inputs (metric functions normalize internally)
+    Uses model.predict_step for consistent denoising with the official pipeline.
     """
-    mesh_path, model, num_samples, noise_std, patch_size, seed_k = args_tuple
+    mesh_path, model, num_samples, noise_std = args_tuple
 
     result = {"path": mesh_path, "cd_pred": None, "cd_noisy": None,
               "p2s_pred": None, "p2s_noisy": None}
@@ -123,19 +118,19 @@ def run_single_eval(args_tuple):
             mesh_path, num_samples, noise_std
         )
 
-        # Denoise in normalized space
-        pc_next = jt.array(noisy_norm.astype(np.float32))
-        for _ in range(3):
-            result_pc = patch_based_denoise(
-                model=model,
-                pcl_noisy=pc_next,
-                patch_size=patch_size,
-                seed_k=seed_k,
-                seed_k_alpha=1,
-            )
-            if result_pc is not None:
-                pc_next = result_pc
-        denoised_norm = pc_next.numpy() if isinstance(pc_next, jt.Var) else pc_next
+        # Denoise using predict_step (same as official evaluation pipeline)
+        pc_var = jt.array(noisy_norm.astype(np.float32)).unsqueeze(0)  # (1, N, 3)
+        batch = {'pc_noisy': pc_var, 'asset': [Asset()]}
+        with jt.no_grad():
+            pred_list = model.predict_step(batch)
+        denoised_result = pred_list[0]['pc_denoised']
+        if isinstance(denoised_result, jt.Var):
+            denoised_norm = denoised_result.numpy()
+        elif isinstance(denoised_result, np.ndarray):
+            denoised_norm = denoised_result
+        else:
+            denoised_norm = np.array(denoised_result)
+        # predict_step returns normalized space when asset.meta is None
 
         # De-normalize to world space for consistent metric normalization
         clean_world = clean_norm * scale + center
@@ -231,7 +226,7 @@ def main():
     noise_std = args.noise_std if args.noise_std is not None else 0.0125
 
     # Build task list
-    tasks = [(p, model, args.num_samples, noise_std, 1000, 6) for p in eval_paths]
+    tasks = [(p, model, args.num_samples, noise_std) for p in eval_paths]
 
     n_workers = args.workers if args.workers > 0 else min(cpu_count(), 8)
     print(f"Running evaluation with {n_workers} workers, noise_std={noise_std}, "
