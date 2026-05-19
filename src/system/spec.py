@@ -256,6 +256,9 @@ class DummySystem():
         # broadcast parameters in distributed mode
         if jt.mpi:
             self.model.mpi_param_broadcast(root=0)
+        # flush accumulated compute graph from model loading / compilation
+        jt.sync_all()
+        jt.gc()
         disable_pbar = not _is_main_process()
         for epoch in range(self.epochs):
             self.model.train()
