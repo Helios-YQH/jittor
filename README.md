@@ -164,6 +164,26 @@ result.zip
         denoised.npy    # np.float32, shape (N, 3)
 ```
 
+## 降噪效果可视化诊断
+
+可视化脚本展示降噪前后的点云对比、位移场误差分析和误差分布直方图：
+```bash
+python vis_denoising.py --task configs/task/predict_vm.yaml --num_samples 3 --vis_points 2000
+```
+输出保存至 `vis_output/` 目录，每样本生成 4 张诊断图。详细问题分析参见 [docs/denoising_debug.md](docs/denoising_debug.md)。
+
+## 常见问题
+
+### 训练中断（Segfault）
+如果你遇到类似：
+```
+Caught segfault at address 0x7f..., thread_name: '', flush log...
+```
+这是由于 GPU 显存跨迭代累积导致的崩溃。已内置 `jt.sync_all()` + `jt.gc()` 自动防护。如在旧版本中遇到，建议拉取最新代码。
+
+### 自测评 CD 分数低
+CD 比 P2S 收敛慢数倍。100 epoch 内 CD 可能几乎不改善甚至下降（先学法向再学切向）。参考 [docs/denoising_debug.md](docs/denoising_debug.md) 的诊断和修复建议。
+
 ## 本地评测（需要 GT 数据，仅组委会持有）
 ```bash
 python evaluate.py \
