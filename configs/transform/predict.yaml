@@ -41,4 +41,5 @@ validate_transform:
       train_cvm_network: False
 
 predict_transform:
-  augments: []
+  augments:
+    - __target__: normalize_pc_predict

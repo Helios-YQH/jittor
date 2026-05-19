@@ -1,19 +1,43 @@
 from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 from jittor import optim
 from typing import Dict, List, Optional
 from tqdm import tqdm
 
 import jittor as jt
 import os
+import time
 
 from ..data.asset import Asset
 from ..data.dataset import PCDatasetModule
 from ..model.spec import ModelSpec
 
+_CST = timezone(timedelta(hours=8))
+
+
+def _now_cst():
+    return datetime.now(_CST)
+
+
 def _get_item(x):
     if isinstance(x, jt.Var):
         return x.item()
     return x
+
+
+def _get_mpi_rank():
+    """Get MPI rank via env var (OpenMPI standard). Returns 0 if not in MPI mode."""
+    if jt.mpi is None:
+        return 0
+    try:
+        return int(os.environ.get('OMPI_COMM_WORLD_RANK', 0))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _is_main_process():
+    """True on rank 0 or single-GPU."""
+    return _get_mpi_rank() == 0
 
 def get_optimizer(optimizer_config, model):
     __target__ = optimizer_config.pop('__target__')
@@ -66,12 +90,23 @@ class DummySystem():
         # scheduler config (optional) - read from trainer_config
         self.scheduler_config = trainer_config.get('scheduler') if isinstance(trainer_config, dict) else None
         self.best_val = None
+        self.patience = trainer_config.get('patience', 0) if isinstance(trainer_config, dict) else 0
+        self._epochs_no_improve = 0
         self._validation_loss = defaultdict(list)
-        # open log file
+        self._train_loss_history = []
+        self._val_loss_history = []
+        # open log file (per-run subdirectory)
         os.makedirs(self.ckpt_save_dir, exist_ok=True)
-        self.log_path = os.path.join(self.ckpt_save_dir, 'training.log')
+        run_name = trainer_config.get('run_name', '') if isinstance(trainer_config, dict) else ''
+        if not run_name:
+            run_name = f"{self.ckpt_save_name}_{_now_cst().strftime('%Y%m%d_%H%M%S')}"
+        self.run_name = run_name
+        self.run_dir = os.path.join(self.ckpt_save_dir, self.run_name)
+        os.makedirs(self.run_dir, exist_ok=True)
+        self.log_path = os.path.join(self.run_dir, 'training.log')
         try:
-            open(self.log_path, 'a').close()
+            with open(self.log_path, 'a') as f:
+                f.write(f"\n{'='*60}\nRun: {self.run_name} started at {_now_cst()}\n{'='*60}\n")
         except Exception:
             pass
     
@@ -145,23 +180,60 @@ class DummySystem():
                 mean_val = None
         except Exception:
             mean_val = None
-        # save best model
+        # all-reduce validation loss across distributed workers
+        if mean_val is not None and jt.mpi:
+            try:
+                mean_val = jt.array(mean_val).mpi_all_reduce("mean")
+                if isinstance(mean_val, jt.Var):
+                    mean_val = mean_val.item()
+            except Exception:
+                pass
+        # save best model (rank 0 only) and track early stopping
+        self._last_val_loss = mean_val
         try:
             if mean_val is not None:
                 if self.best_val is None or mean_val < self.best_val:
                     self.best_val = mean_val
-                    best_path = os.path.join(self.ckpt_save_dir, f'{self.ckpt_save_name}_best.pkl')
-                    self.model.save(best_path)
+                    self._epochs_no_improve = 0
+                    best_path = os.path.join(self.run_dir, f'{self.ckpt_save_name}_best.pkl')
+                    if _is_main_process():
+                        self.model.save(best_path)
                     try:
                         with open(self.log_path, 'a') as f:
                             f.write(f"New best validation {mean_val}\n")
                     except Exception:
                         pass
+                else:
+                    self._epochs_no_improve += 1
         except Exception:
             pass
     
     def on_before_optimizer_step(self, optimizer):
         pass
+
+    def _plot_curve(self):
+        """Save training curve as PNG in run directory."""
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(10, 6))
+            epochs = range(len(self._train_loss_history))
+            ax.plot(epochs, self._train_loss_history, 'b-', label='Train Loss', linewidth=1.5)
+            if self._val_loss_history:
+                ax.plot(epochs, self._val_loss_history, 'r-', label='Val Loss', linewidth=1.5)
+                best_epoch = min(range(len(self._val_loss_history)), key=lambda i: self._val_loss_history[i])
+                ax.axvline(x=best_epoch, color='g', linestyle='--', alpha=0.5, label=f'Best Val ({self.best_val:.4f})')
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('Loss')
+            ax.set_title(f'Training Curve - {self.run_name}')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(os.path.join(self.run_dir, 'training_curve.png'), dpi=150)
+            plt.close()
+        except Exception:
+            pass
     
     def on_predict_epoch_start(self):
         pass
@@ -181,20 +253,30 @@ class DummySystem():
     def train(self):
         assert self.optimizer is not None, "optimizer is None, cannot train"
         self.model.set_predict(False)
+        # broadcast parameters in distributed mode
+        if jt.mpi:
+            self.model.mpi_param_broadcast(root=0)
+        disable_pbar = not _is_main_process()
         for epoch in range(self.epochs):
             self.model.train()
             self.on_train_epoch_start()
             train_dataloader = self.dataset_module.train_dataloader()
             assert train_dataloader is not None, "train_dataloader is None"
-            pbar = tqdm(train_dataloader, total=len(train_dataloader)//train_dataloader.batch_size) # type: ignore
+            pbar = tqdm(train_dataloader, total=len(train_dataloader)//train_dataloader.batch_size, disable=disable_pbar) # type: ignore
+            epoch_losses = []
+            t_ep_start = time.time()
             for batch in pbar:
                 self.on_train_batch_start()
                 loss = self.training_step(batch)
                 self.optimizer.zero_grad()
                 self.optimizer.backward(loss)
-                pbar.set_description(f"Epoch {epoch}, Loss: {_get_item(loss)}")
+                loss_val = _get_item(loss)
+                epoch_losses.append(loss_val)
+                pbar.set_description(f"Epoch {epoch}, Loss: {loss_val:.4f}")
                 self.on_before_optimizer_step(self.optimizer)
                 self.optimizer.step()
+                jt.sync_all()  # execute pending ops and release GPU memory
+                jt.gc()       # force Jittor garbage collection
                 self.on_train_batch_end()
             self.on_train_epoch_end()
             
@@ -204,24 +286,48 @@ class DummySystem():
                 self.on_validation_epoch_start()
                 if isinstance(validate_dataloader, dict):
                     for name, dataloader in validate_dataloader.items():
-                        pbar = tqdm(dataloader, total=len(dataloader)//dataloader.batch_size)
+                        pbar = tqdm(dataloader, total=len(dataloader)//dataloader.batch_size, disable=disable_pbar)
                         for batch in pbar:
                             self.on_validation_batch_start()
                             loss = self.validation_step(batch)
                             pbar.set_description(f"Epoch {epoch}, Validate {name}, Loss: {_get_item(loss)}")
                             self.on_validation_batch_end()
                 else:
-                    pbar = tqdm(validate_dataloader, total=len(validate_dataloader)//validate_dataloader.batch_size)
+                    pbar = tqdm(validate_dataloader, total=len(validate_dataloader)//validate_dataloader.batch_size, disable=disable_pbar)
                     for batch in pbar:
                         self.on_validation_batch_start()
                         loss = self.validation_step(batch)
                         pbar.set_description(f"Epoch {epoch}, Validate, Loss: {_get_item(loss)}")
                         self.on_validation_batch_end()
                 self.on_validation_epoch_end()
-            
-            checkpoint_path = os.path.join(self.ckpt_save_dir, f'{self.ckpt_save_name}_{epoch}.pkl')
-            os.makedirs(self.ckpt_save_dir, exist_ok=True)
-            self.model.save(checkpoint_path)
+                jt.sync_all()
+                jt.gc()
+
+            # epoch summary
+            if _is_main_process():
+                t_ep = time.time() - t_ep_start
+                mean_loss = sum(epoch_losses) / len(epoch_losses)
+                lr = self.optimizer.param_groups[0].get('lr', '?')
+                best_str = f"{self._last_val_loss:.4f}" if self._last_val_loss is not None else "N/A"
+                flag = " ★" if self._epochs_no_improve == 0 and self.best_val is not None else ""
+                print(f"Epoch {epoch:3d}/{self.epochs} | "
+                      f"Loss: {mean_loss:.4f} | Val: {best_str}{flag} | "
+                      f"LR: {lr} | {t_ep:.1f}s")
+                try:
+                    with open(self.log_path, 'a') as f:
+                        f.write(f"Epoch {epoch:3d} | Loss: {mean_loss:.4f} | Val: {best_str}{flag} | LR: {lr} | {t_ep:.1f}s\n")
+                except Exception:
+                    pass
+                self._train_loss_history.append(mean_loss)
+                self._val_loss_history.append(self._last_val_loss if self._last_val_loss is not None else float('nan'))
+                self._plot_curve()
+
+            checkpoint_path = os.path.join(self.run_dir, f'{self.ckpt_save_name}_{epoch}.pkl')
+            os.makedirs(self.run_dir, exist_ok=True)
+            if _is_main_process():
+                self.model.save(checkpoint_path)
+            jt.sync_all()
+            jt.gc()
             # update scheduler if configured
             if self.scheduler_config is not None:
                 try:
@@ -238,12 +344,11 @@ class DummySystem():
                                     self.optimizer.lr = getattr(self.optimizer, 'lr', 1e-4) * gamma
                 except Exception:
                     pass
-            # log epoch end
-            try:
-                with open(self.log_path, 'a') as f:
-                    f.write(f"Epoch {epoch} finished.\n")
-            except Exception:
-                pass
+            # early stopping
+            if self.patience > 0 and self._epochs_no_improve >= self.patience:
+                if _is_main_process():
+                    print(f"Early stopping: no improvement for {self.patience} epochs.")
+                break
     
     def predict(self):
         # only iterate once

@@ -143,6 +143,20 @@ class VelocityModule(ModelSpec):
                     seed_k=6,
                     seed_k_alpha=1,
                 )
+            
+            # 反归一化
+            asset = batch['asset'][i]
+            if asset.meta is not None and 'normalize_center' in asset.meta and 'normalize_scale' in asset.meta:
+                center = asset.meta['normalize_center']
+                scale = asset.meta['normalize_scale']
+                # 转换为 numpy 进行反归一化
+                if isinstance(pc_next, jt.Var):
+                    pc_next_np = pc_next.numpy()
+                else:
+                    pc_next_np = pc_next
+                pc_next_np = pc_next_np * scale + center
+                pc_next = pc_next_np
+            
             res.append({"pc_denoised": pc_next})
         return res
     
@@ -200,8 +214,8 @@ def knn_points(x, y, k, chunk_size: int = 1024):
     y: (B, N, 3)
     return:
         dist: (B, P, k)
-        idx:  (B, P, k)
-        nn:   (B, P, k, 3)
+        idx: (B, P, k)
+        nn: (B, P, k, 3)
     """
     B, P, _ = x.shape
     _, N, _ = y.shape
@@ -220,7 +234,7 @@ def knn_points(x, y, k, chunk_size: int = 1024):
             if best_dist is None:
                 # initial chunk
                 best_dist, best_idx = jt.topk(dist, k=k, dim=-1, largest=False)
-                idx_chunk = jt.arange(start, end).int32().reshape(1, -1).broadcast(best_dist.shape)
+                idx_chunk = jt.arange(start, end).int32().reshape(1, -1).broadcast((P, end - start))
                 best_idx = idx_chunk.gather(dim=-1, index=best_idx)
             else:
                 # merge current chunk into running top-k
@@ -251,7 +265,8 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
     
     seed_pnts, seed_idx = farthest_point_sampling(pcl_noisy, num_patches)
     patch_dists, point_idxs, patches = knn_points(seed_pnts, pcl_noisy, patch_size)
-    
+    jt.sync_all()  # execute KNN and release intermediate GPU buffers
+
     # keep everything in Jittor tensors (avoid numpy roundtrips)
     patches = patches[0]              # (P, M, 3)
     patch_dists = patch_dists[0]      # (P, M)
@@ -274,6 +289,8 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
     i = 0
     patch_step = int(ceil(N / (seed_k_alpha * patch_size)))
     assert patch_step > 0
+    # cap patches per iteration to limit GPU memory (edge graph: patch_step * 1000 * k edges)
+    patch_step = min(patch_step, 8)
     while i < num_patches:
         curr = patches[i:i+patch_step]
         try:
@@ -281,29 +298,30 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
         except Exception as e:
             print("Denoise error:", e)
             return None
+        # detach from computation graph to prevent GPU memory accumulation
+        if isinstance(out, jt.Var):
+            out = jt.array(out.numpy())
         patches_denoised.append(out)
         i += patch_step
     
     patches_denoised = jt.concat(patches_denoised, dim=0)
     patches_denoised = patches_denoised + seed_expand
-    # Robust reconstruction: fill output per global index using best_weights_idx and point_idxs
+    # Vectorized reconstruction: fill output per global index using best_weights_idx and point_idxs
     pcl_out = jt.zeros((N, 3))
     assigned = jt.zeros((N,)).int32()
-    # Iterate patches and assign local points to their global indices when this patch is chosen
     for pid in range(num_patches):
-        # get global indices for this patch (point_idxs[pid] shape: (M,))
-        globals_in_patch = point_idxs[pid]
-        local_num = globals_in_patch.shape[0]
-        for li in range(local_num):
-            g = int(globals_in_patch[li].item())
-            # check whether this global index chooses this patch
-            if int(best_weights_idx[g].item()) == pid:
-                pcl_out[g] = patches_denoised[pid][li]
-                assigned[g] = 1
+        gidx = point_idxs[pid]
+        mask = jt.equal(best_weights_idx[gidx], pid)
+        if mask.int32().sum().item() > 0:
+            local_sel = jt.nonzero(mask)
+            if local_sel.ndim > 1:
+                local_sel = local_sel.reshape(-1)
+            global_sel = gidx[local_sel]
+            pcl_out[global_sel] = patches_denoised[pid][local_sel]
+            assigned[global_sel] = 1
     # Fallback: any unassigned global points copy from input noisy cloud
     unassigned_mask = (assigned == 0)
-    # avoid truth-value ambiguity for jt.Var
-    if int(unassigned_mask.sum().item()) > 0:
+    if unassigned_mask.int32().sum().item() > 0:
         noisy_points = pcl_noisy.squeeze(0)
         pcl_out[unassigned_mask] = noisy_points[unassigned_mask]
     return pcl_out

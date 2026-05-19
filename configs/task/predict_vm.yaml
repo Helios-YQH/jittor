@@ -1,6 +1,6 @@
 mode: predict
 debug: False
-load_ckpt: experiments/vm/checkpoint_99.pkl
+load_ckpt: experiments/vm/checkpoint_20260519_084730/checkpoint_best.pkl  # 首次使用请替换 <run_name> 为实际的运行目录
 
 components:
   data: predict

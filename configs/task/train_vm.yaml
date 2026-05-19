@@ -1,5 +1,6 @@
 mode: train
 debug: False
+load_ckpt: experiments/vm/checkpoint_20260519_084730/checkpoint_best.pkl  # uncomment to resume from previous best
 
 components:
   data: train
@@ -16,6 +17,8 @@ optimizer:
 
 trainer:
   epochs: 100
+  run_name: ""
+  # patience: 10       # uncomment to enable early stopping (stop if no improvement for N epochs)
   scheduler:
     type: step
     step_size: 30
