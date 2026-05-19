@@ -193,12 +193,17 @@ def get_knn_idx(x, y, k, offset=0, chunk_size: int = 1024):
     for b in range(B):
         x_b = x[b]
         y_b = y[b]
+        x_b_sq = (x_b ** 2).sum(-1, keepdims=True)  # (N, 1), cached for all y chunks
         best_dist = None
         best_idx = None
         for start_idx in range(0, M, chunk_size):
             end_idx = min(start_idx + chunk_size, M)
             y_chunk = y_b[start_idx:end_idx]
-            dist = ((x_b.unsqueeze(1) - y_chunk.unsqueeze(0)) ** 2).sum(-1)
+            # Use expansion: ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a·b^T
+            # Avoids materializing (N, C, d) intermediate tensor
+            dot = jt.matmul(x_b, y_chunk.transpose(1, 0))  # (N, C)
+            y_chunk_sq = (y_chunk ** 2).sum(-1)  # (C,)
+            dist = x_b_sq + y_chunk_sq - 2 * dot  # (N, C)
             if best_dist is None:
                 best_dist, best_idx = jt.topk(dist, k=K, dim=-1, largest=False)
                 idx_chunk = jt.arange(start_idx, end_idx).int32().reshape(1, -1).broadcast((N, end_idx - start_idx))
