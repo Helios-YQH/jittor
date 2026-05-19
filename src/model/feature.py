@@ -84,6 +84,7 @@ class FeatureExtraction(nn.Module):
         # x: (B, N, C)
         B, N, _ = x.shape
         knn_idx = get_knn_idx(x, x, self.k + 1)  # (B, N, k+1)
+        jt.sync_all()  # execute KNN and release intermediate GPU buffers
         knn_idx = knn_idx[:, :, 1:]
         base = jt.arange(B) * N  # (B,)
         base = base.reshape(B, 1, 1)
@@ -215,5 +216,6 @@ def get_knn_idx(x, y, k, offset=0, chunk_size: int = 1024):
                 best_dist, top_k = jt.topk(cat_dist, k=K, dim=-1, largest=False)
                 best_idx = cat_idx.gather(dim=-1, index=top_k)
         idx_list.append(best_idx)
+        jt.sync_all()  # execute per-batch KNN, release GPU buffers
     idx = jt.stack(idx_list, dim=0)
     return idx[:, :, offset:]
