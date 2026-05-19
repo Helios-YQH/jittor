@@ -275,6 +275,8 @@ class DummySystem():
                 pbar.set_description(f"Epoch {epoch}, Loss: {loss_val:.4f}")
                 self.on_before_optimizer_step(self.optimizer)
                 self.optimizer.step()
+                jt.sync_all()  # execute pending ops and release GPU memory
+                jt.gc()       # force Jittor garbage collection
                 self.on_train_batch_end()
             self.on_train_epoch_end()
             
@@ -298,6 +300,8 @@ class DummySystem():
                         pbar.set_description(f"Epoch {epoch}, Validate, Loss: {_get_item(loss)}")
                         self.on_validation_batch_end()
                 self.on_validation_epoch_end()
+                jt.sync_all()
+                jt.gc()
 
             # epoch summary
             if _is_main_process():
@@ -322,6 +326,8 @@ class DummySystem():
             os.makedirs(self.run_dir, exist_ok=True)
             if _is_main_process():
                 self.model.save(checkpoint_path)
+            jt.sync_all()
+            jt.gc()
             # update scheduler if configured
             if self.scheduler_config is not None:
                 try:

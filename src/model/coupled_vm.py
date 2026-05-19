@@ -70,7 +70,9 @@ class CoupledVelocityModule(ModelSpec):
                 c=self.vm1.encoder(pc_mix).reshape(-1, self.vm1.encoder.embedding_dim)
             ).reshape(B, Np, 3)
             X_t1 = pc_noisy + (1.0 / self.K) * v0
-        
+        jt.sync_all()  # release no_grad encoder intermediate tensors
+        jt.gc()
+
         # VM2 基于中间状态 X_t1 学习，而非原始 pc_noisy
         loss_vm2 = self.vm2.get_supervised_loss(X_t1, X_t1, pc_clean)
         
