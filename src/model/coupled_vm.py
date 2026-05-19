@@ -38,18 +38,27 @@ class CoupledVelocityModule(ModelSpec):
         return 0.5 * (loss1 + loss2)
 
     def deterministic_euler_step(self, pcl_noisy, num_steps=3):
+        """Paper Eq.(15): X_{t+1} = X_t + d_φ(X_init)/T * v_θ^k(X_t)
+
+        DistanceModule scales the step size based on estimated distance to clean surface.
+        """
         B, P, d = pcl_noisy.shape
         pcl = pcl_noisy
-        T = num_steps * self.K
+
+        # Compute distance scalar from initial state (paper: d_φ(X̂_M/T))
+        feat_init = self.vm1.encoder(pcl)  # (B, P, F)
+        d_phi = self.distance_module(feat_init)  # scalar ∈ [0,1] per batch
+
+        T = num_steps * self.K  # 6
         for _ in range(num_steps):
             # vm1
             feat = self.vm1.encoder(pcl)
             v0 = self.vm1.decoder(c=feat.reshape(-1, feat.shape[2])).reshape(B, P, d)
-            pcl = pcl + (1.0 / T) * v0
+            pcl = pcl + (d_phi / T) * v0
             # vm2
             feat2 = self.vm2.encoder(pcl)
             v1 = self.vm2.decoder(c=feat2.reshape(-1, feat2.shape[2])).reshape(B, P, d)
-            pcl = pcl + (1.0 / T) * v1
+            pcl = pcl + (d_phi / T) * v1
         return pcl
 
     def training_step(self, batch: Dict) -> Dict:
@@ -57,26 +66,42 @@ class CoupledVelocityModule(ModelSpec):
         pc_noisy = batch['pc_noisy'].reshape(-1, patch_size, 3)
         pc_mix = batch['pc_mix'].reshape(-1, patch_size, 3)
         pc_clean = batch['pc_clean'].reshape(-1, patch_size, 3)
-        
+
         B, Np, _ = pc_noisy.shape
-        
+
         # VM1: 学习从 pc_noisy → pc_clean 的速度场
         loss_vm1 = self.vm1.get_supervised_loss(pc_noisy, pc_mix, pc_clean)
-        
+
         # VM2: 学习从 X_t1 → pc_clean 的修正速度场
-        # 使用 pc_mix 提取特征以保证与 VM1 训练时特征分布一致
         with jt.no_grad():
             v0 = self.vm1.decoder(
                 c=self.vm1.encoder(pc_mix).reshape(-1, self.vm1.encoder.embedding_dim)
             ).reshape(B, Np, 3)
             X_t1 = pc_noisy + (1.0 / self.K) * v0
-        jt.sync_all()  # release no_grad encoder intermediate tensors
+        jt.sync_all()
         jt.gc()
 
-        # VM2 基于中间状态 X_t1 学习，而非原始 pc_noisy
         loss_vm2 = self.vm2.get_supervised_loss(X_t1, X_t1, pc_clean)
-        
-        loss = loss_vm1 + loss_vm2
+
+        # DistanceModule loss (paper Eq.(14), first term)
+        # X_0 = pc_clean + Laplace(0, sigma_H)  [high-noise variant]
+        # X_t0 = (1-t)*X_0 + t*pc_clean          [intermediate state]
+        # target = ||pc_clean - X_t0|| / ||pc_clean - X_0|| = 1 - t
+        sigma_H = 0.02
+        import numpy as np
+        high_noise_np = np.random.laplace(0, sigma_H, size=pc_clean.shape).astype(np.float32)
+        high_noise = jt.array(high_noise_np)
+        X_0 = pc_clean + high_noise
+        t = float(np.random.uniform(0, 1))
+        X_t0 = (1.0 - t) * X_0 + t * pc_clean
+
+        with jt.no_grad():
+            feat_dist = self.vm1.encoder(X_t0)  # (B, Np, F)
+        d_phi_pred = self.distance_module(feat_dist)
+        target_dist = 1.0 - t
+        loss_dist = ((d_phi_pred - target_dist) ** 2).mean()
+
+        loss = loss_vm1 + loss_vm2 + loss_dist
         return {"loss": loss}
 
     def execute(self, **kwargs) -> Dict:

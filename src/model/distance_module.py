@@ -16,18 +16,18 @@ class DistanceModule(nn.Module):
         self.head = nn.Linear(hidden_dim, 1)
 
     def execute(self, features):
-        # features: (B, N, F) or (B*N, F)
+        """Paper Eq.(13): d_φ = Sigmoid(Max(D_φ(X_t0)))
+
+        Returns a single scalar per patch ∈ [0, 1] estimating the relative
+        distance of the input state from the clean surface.
+        """
         if len(features.shape) == 3:
             B, N, F = features.shape
             features = features.reshape(B * N, F)
-            squeeze_back = True
-        else:
-            squeeze_back = False
         h = self.encoder(features)
-        d = self.head(h)
-        d = jt.sigmoid(d)
-        if squeeze_back:
-            d = d.reshape(B, N, 1)
+        d = self.head(h)          # (B*N, 1) — per-point raw predictions
+        d = jt.max(d, dim=0)      # Max over all points → single scalar per batch
+        d = jt.sigmoid(d)         # Paper Eq.(13): sigmoid AFTER max
         return d
 
     def loss(self, pred_distance, true_distance_ratio):
