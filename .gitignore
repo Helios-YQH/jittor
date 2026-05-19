@@ -17,5 +17,6 @@ results/
 experiments/
 tmp_predict/
 *.zip
+vis_output/
 
 dataset_train.tar.gz
