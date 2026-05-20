@@ -84,22 +84,21 @@ class FeatureExtraction(nn.Module):
         # x: (B, N, C)
         B, N, _ = x.shape
         knn_idx = get_knn_idx(x, x, self.k + 1)  # (B, N, k+1)
-        jt.sync_all()  # execute KNN and release intermediate GPU buffers
         knn_idx = knn_idx[:, :, 1:]
         base = jt.arange(B) * N  # (B,)
         base = base.reshape(B, 1, 1)
-        
+
         knn_idx = knn_idx + base  # (B, N, k)
-        
+
         dst = jt.arange(N)
         dst = dst.reshape(1, N, 1).broadcast((B, N, self.k))
         dst = dst + base
-        
+
         src = knn_idx.reshape(-1)
         dst = dst.reshape(-1)
-        
+
         edge_index = jt.stack([src, dst], dim=0)  # (2, E)
-        
+
         return edge_index
     
     def normalize_patch(self, pcl):
@@ -194,17 +193,12 @@ def get_knn_idx(x, y, k, offset=0, chunk_size: int = 1024):
     for b in range(B):
         x_b = x[b]
         y_b = y[b]
-        x_b_sq = (x_b ** 2).sum(-1, keepdims=True)  # (N, 1), cached for all y chunks
         best_dist = None
         best_idx = None
         for start_idx in range(0, M, chunk_size):
             end_idx = min(start_idx + chunk_size, M)
             y_chunk = y_b[start_idx:end_idx]
-            # Use expansion: ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a·b^T
-            # Avoids materializing (N, C, d) intermediate tensor
-            dot = jt.matmul(x_b, y_chunk.transpose(1, 0))  # (N, C)
-            y_chunk_sq = (y_chunk ** 2).sum(-1)  # (C,)
-            dist = x_b_sq + y_chunk_sq - 2 * dot  # (N, C)
+            dist = ((x_b.unsqueeze(1) - y_chunk.unsqueeze(0)) ** 2).sum(-1)
             if best_dist is None:
                 best_dist, best_idx = jt.topk(dist, k=K, dim=-1, largest=False)
                 idx_chunk = jt.arange(start_idx, end_idx).int32().reshape(1, -1).broadcast((N, end_idx - start_idx))
@@ -216,6 +210,5 @@ def get_knn_idx(x, y, k, offset=0, chunk_size: int = 1024):
                 best_dist, top_k = jt.topk(cat_dist, k=K, dim=-1, largest=False)
                 best_idx = cat_idx.gather(dim=-1, index=top_k)
         idx_list.append(best_idx)
-        jt.sync_all()  # execute per-batch KNN, release GPU buffers
     idx = jt.stack(idx_list, dim=0)
     return idx[:, :, offset:]

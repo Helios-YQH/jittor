@@ -71,6 +71,7 @@ class CoupledVelocityModule(ModelSpec):
 
         # VM1: 学习从 pc_noisy → pc_clean 的速度场
         loss_vm1 = self.vm1.get_supervised_loss(pc_noisy, pc_mix, pc_clean)
+        jt.sync_all()  # execute vm1 forward, free intermediates before next encoder
 
         # VM2: 学习从 X_t1 → pc_clean 的修正速度场
         with jt.no_grad():
@@ -98,6 +99,7 @@ class CoupledVelocityModule(ModelSpec):
         with jt.no_grad():
             feat_dist = self.vm1.encoder(X_t0)  # (B, Np, F)
         d_phi_pred = self.distance_module(feat_dist)
+        jt.sync_all()  # execute DistanceModule forward, free encoder intermediates
         target_dist = 1.0 - t
         loss_dist = ((d_phi_pred - target_dist) ** 2).mean()
 
