@@ -113,27 +113,39 @@ class FeatureExtraction(nn.Module):
         if self.distance_estimation:
             x = self.normalize_patch(x)
 
-        # Compute edge indices only when needed and avoid repeated heavy base arithmetic
-        # -------- conv1 --------
-        edge_index1 = self.get_edge_index(x)
-        x_flat = x.reshape(B * N, -1)
-        x1 = self.conv1(x_flat, edge_index1)
-        x1 = x1.reshape(B, N, -1)
+        # Process patches in mini-batches to avoid materializing large
+        # EdgeConv intermediates (e.g., concat(B*N*k, 2C) = 7 GB for B=576).
+        # Each mini-batch's graph is synced and freed before the next starts.
+        MAX_B = 8
+        x3_list = []
+        for b_start in range(0, B, MAX_B):
+            b_end = min(b_start + MAX_B, B)
+            x_mini = x[b_start:b_end]  # (mini_B, N, C)
+            mini_B = b_end - b_start
 
-        # -------- conv2 --------
-        edge_index2 = self.get_edge_index(x1)
-        x1_flat = x1.reshape(B * N, -1)
-        x2 = self.conv2(x1_flat, edge_index2)
-        x2 = x2.reshape(B, N, -1)
+            # ---- conv1 ----
+            edge_index1 = self.get_edge_index(x_mini)
+            x_flat = x_mini.reshape(mini_B * N, -1)
+            x1 = self.conv1(x_flat, edge_index1)
+            x1 = x1.reshape(mini_B, N, -1)
 
-        # -------- conv3 --------
-        edge_index3 = self.get_edge_index(x2)
-        x_combined = jt.concat([x1, x2], dim=-1)
-        x_combined_flat = x_combined.reshape(B * N, -1) # type: ignore
-        x3 = self.conv3(x_combined_flat, edge_index3)
-        x3 = x3.reshape(B, N, -1)
+            # ---- conv2 ----
+            edge_index2 = self.get_edge_index(x1)
+            x1_flat = x1.reshape(mini_B * N, -1)
+            x2 = self.conv2(x1_flat, edge_index2)
+            x2 = x2.reshape(mini_B, N, -1)
 
-        return x3
+            # ---- conv3 ----
+            edge_index3 = self.get_edge_index(x2)
+            x_combined = jt.concat([x1, x2], dim=-1)
+            x_combined_flat = x_combined.reshape(mini_B * N, -1)
+            x3 = self.conv3(x_combined_flat, edge_index3)
+            x3 = x3.reshape(mini_B, N, -1)
+
+            x3_list.append(x3)
+            jt.sync_all()  # execute and free this mini-batch before next
+
+        return jt.concat(x3_list, dim=0)
 
 class Decoder(nn.Module):
     
