@@ -91,7 +91,19 @@ if __name__ == "__main__":
     load_ckpt = task.get('load_ckpt', None)
     if load_ckpt is not None and model is not None:
         print(f"Loading checkpoint: {load_ckpt}")
-        model.load(load_ckpt)
+        # 只加载模型参数，不包含优化器状态 / 额外 metadata
+        raw = jt.load(load_ckpt)
+        # 兼容不同保存格式：提取嵌套的 state_dict
+        if isinstance(raw, dict):
+            for key in ('model', 'state_dict', 'params'):
+                if key in raw:
+                    print(f"  Extracting state_dict from checkpoint['{key}']")
+                    raw = raw[key]
+                    break
+        model.load_state_dict(raw)
+        # 释放加载过程中产生的中间 GPU 缓存
+        jt.sync_all()
+        jt.gc()
 
     train_transform = (Transform.parse(**transform_config.get('train_transform', {}))) if model is None else model.get_train_transform()
     validate_transform = (Transform.parse(**transform_config.get('validate_transform', {}))) if model is None else model.get_validate_transform()

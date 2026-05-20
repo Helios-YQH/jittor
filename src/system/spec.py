@@ -257,8 +257,9 @@ class DummySystem():
         if jt.mpi:
             self.model.mpi_param_broadcast(root=0)
         # flush accumulated compute graph from model loading / compilation
-        jt.sync_all()
+        jt.sync_all(True)  # device-level sync — 比 sync_all() 更彻底
         jt.gc()
+        jt.sync_all(True)
         disable_pbar = not _is_main_process()
         for epoch in range(self.epochs):
             self.model.train()

@@ -3,7 +3,12 @@
     "allow": [
       "WebSearch",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(python -c \"import jittor as jt; help\\(jt.Module.load\\)\")",
+      "Bash(python -c \"import jittor as jt; help\\(jt.load\\)\")",
+      "Bash(python -c \"import jittor as jt; print\\([x for x in dir\\(jt\\) if 'sync' in x.lower\\(\\) or 'gc' in x.lower\\(\\) or 'flush' in x.lower\\(\\) or 'mem' in x.lower\\(\\) or 'pool' in x.lower\\(\\)]\\)\")",
+      "Bash(pip show *)",
+      "Bash(conda list *)"
     ]
   }
 }

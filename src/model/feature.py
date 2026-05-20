@@ -145,6 +145,10 @@ class FeatureExtraction(nn.Module):
         B, N, C = x.shape
         if B <= chunk_size:
             return self(x)
+        # flush any accumulated graph BEFORE processing chunks,
+        # so that the first chunk's forward + sync doesn't OOM
+        jt.sync_all()
+        jt.gc()
         out = []
         for b in range(0, B, chunk_size):
             out.append(self(x[b:b + chunk_size]))
