@@ -87,18 +87,18 @@ class FeatureExtraction(nn.Module):
         knn_idx = knn_idx[:, :, 1:]
         base = jt.arange(B) * N  # (B,)
         base = base.reshape(B, 1, 1)
-
+        
         knn_idx = knn_idx + base  # (B, N, k)
-
+        
         dst = jt.arange(N)
         dst = dst.reshape(1, N, 1).broadcast((B, N, self.k))
         dst = dst + base
-
+        
         src = knn_idx.reshape(-1)
         dst = dst.reshape(-1)
-
+        
         edge_index = jt.stack([src, dst], dim=0)  # (2, E)
-
+        
         return edge_index
     
     def normalize_patch(self, pcl):
@@ -134,26 +134,6 @@ class FeatureExtraction(nn.Module):
         x3 = x3.reshape(B, N, -1)
 
         return x3
-
-    def chunked_forward(self, x, chunk_size=8):
-        """Mini-batch forward with sync between chunks.
-
-        Processes at most ``chunk_size`` patches at a time to bound the
-        EdgeConv intermediate memory.  Same semantics as ``execute()`` but
-        suitable for large B during training.
-        """
-        B, N, C = x.shape
-        if B <= chunk_size:
-            return self(x)
-        # flush any accumulated graph BEFORE processing chunks,
-        # so that the first chunk's forward + sync doesn't OOM
-        jt.sync_all()
-        jt.gc()
-        out = []
-        for b in range(0, B, chunk_size):
-            out.append(self(x[b:b + chunk_size]))
-            jt.sync_all()
-        return jt.concat(out, dim=0)
 
 class Decoder(nn.Module):
     

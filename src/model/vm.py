@@ -51,7 +51,7 @@ class VelocityModule(ModelSpec):
         pnt_idx = get_random_indices(N_noisy, self.num_train_points)
         
         # Feature extraction
-        feat = self.encoder.chunked_forward(pc_mix)  # (B, N, F)
+        feat = self.encoder(pc_mix)  # (B, N, F)
         F_dim = feat.shape[2]
         
         # gather
