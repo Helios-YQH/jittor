@@ -50,8 +50,8 @@ class VelocityModule(ModelSpec):
         
         pnt_idx = get_random_indices(N_noisy, self.num_train_points)
         
-        # Feature extraction
-        feat = self.encoder(pc_mix)  # (B, N, F)
+        # Feature extraction (use pc_noisy for same distribution as inference)
+        feat = self.encoder(pc_noisy)  # (B, N, F)
         F_dim = feat.shape[2]
         
         # gather
