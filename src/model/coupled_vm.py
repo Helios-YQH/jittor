@@ -71,6 +71,10 @@ class CoupledVelocityModule(ModelSpec):
 
         # VM1: 学习从 pc_noisy → pc_clean 的速度场
         loss_vm1 = self.vm1.get_supervised_loss(pc_noisy, pc_mix, pc_clean)
+        # 分断图：执行并清空 loss_vm1 累积的算子，防止后续 no_grad encoder
+        # 再叠加后总图超过 Jittor 融合阈值（触发 6GB+ 中间张量分配）
+        jt.sync_all()
+        jt.gc()
 
         # VM2: 学习从 X_t1 → pc_clean 的修正速度场
         with jt.no_grad():
