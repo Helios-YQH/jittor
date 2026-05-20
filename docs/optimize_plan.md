@@ -16,7 +16,7 @@
 
 ## P0: 激活 DistanceModule ✅ (optimize-v1)
 
-**状态**: 已实现，待训练验证
+**状态**: 已实现，训练验证通过
 
 ### 修改内容
 
@@ -24,16 +24,40 @@
 - `execute()` 改为 `Max(head(encoder(features))) → Sigmoid`，输出每 batch 一个标量
 
 **`src/model/coupled_vm.py`**:
-- `deterministic_euler_step()` : 从初始状态特征计算 d_φ，缩放所有速度步
-- `training_step()` : 新增 DistanceModule 损失
+- `deterministic_euler_step()`: 从初始状态特征计算 d_φ，缩放所有速度步
+- `training_step()`: 新增 DistanceModule 损失（Eq.14 第一项）
   - X_0 = pc_clean + Laplace(0, 0.02) 高噪声变体
   - X_t0 = (1-t)·X_0 + t·pc_clean, t~U(0,1)
-  - target = 1-t (= 相对距离比)
+  - target = 1-t
+- 在 loss_vm1 后和 no_grad block 后各加 `jt.sync_all() + jt.gc()` 分断图防 OOM
+
+### OOM 处理记录
+
+| 尝试 | 结果 | 原因 |
+|------|------|------|
+| `chunked_forward` + 内部 `jt.sync_all()` | ❌ 更糟 | 8 patch 打包成图，峰值 ~400MB > 可用 138MB |
+| `spec.py` 训练前 flush | ❌ 无效 | Jittor pool 23GB 是预分配，flush 不释放 |
+| 只加载 state_dict | ❌ 无效 | 问题不在 checkpoint |
+| **batch 间加 sync_all 分断图** | ✅ 解决 | 100K ops 切为 30K+30K，fusion 峰值可控 |
+| **MPI 多卡分布式训练** | ✅ 推荐 | batch 自动分摊，每卡 12 样本无压力 |
 
 ### 注意事项
 - 旧 checkpoint 不含 distance_module 权重（随机 init）
-- 前几个 epoch d_φ 尚未收敛，推理结果可能波动
-- 训练 1-2 epoch 后 d_φ 应迅速学习预测 (1-t)
+- DistanceModule 仅 81KB / 总参 4.7%，参数冻结对 forward 速度无提升
+- **单卡**调试建议 `batch_size=12`，**6 卡生产**用 `batch_size=72`
+- 配置见 `configs/data/train.yaml`
+
+### 6 卡 MPI 分布式训练
+
+```bash
+mpirun -np 6 python run.py --task configs/task/train_vm.yaml
+```
+
+Jittor 自动处理：
+- 数据集拆分：每卡读取不同子集
+- 参数广播：`model.mpi_param_broadcast(root=0)` 在 `train()` 中
+- 梯度同步：`optimizer.step()` 内置梯度 all-reduce
+- `batch_size` 为全局总 batch，平分到每卡
 
 ---
 
@@ -130,8 +154,7 @@ loss = loss_vm1 + loss_vm2 + λ₁ * loss_correct
 
 从 `experiments/vm/checkpoint_20260519_084730/checkpoint_best.pkl` 出发：
 
-1. **Phase 1** (P0, optimize-v1): 冻结 VM1/VM2，训练 DistanceModule 1-2 epoch
-2. **Phase 2** (P0, optimize-v1): 解冻，全部参数微调 20+ epoch
-3. **Phase 3** (P1): 修复 encoder 输入，继续训练
-4. **Phase 4** (P2): 添加轨迹校正，继续训练
-5. 每阶段保存独立 checkpoint 用于对比自测评
+1. **Phase 1** (P0, optimize-v1): 全参数训练 DistanceModule + VM1/VM2，6 卡 MPI
+2. **Phase 2** (P1): 修复 encoder 输入，继续训练
+3. **Phase 3** (P2): 添加轨迹校正，继续训练
+4. 每阶段保存独立 checkpoint 用于对比自测评

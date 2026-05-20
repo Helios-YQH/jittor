@@ -3,7 +3,7 @@ loader: &loader obj
 
 train_dataset:
   shuffle: True
-  batch_size: 12
+  batch_size: 72
   num_workers: 4
   drop_last: True
   datapath:
