@@ -308,6 +308,8 @@ class DummySystem():
                 t_ep = time.time() - t_ep_start
                 mean_loss = sum(epoch_losses) / len(epoch_losses)
                 lr = self.optimizer.param_groups[0].get('lr', '?')
+                if isinstance(lr, jt.Var):
+                    lr = lr.item()
                 best_str = f"{self._last_val_loss:.4f}" if self._last_val_loss is not None else "N/A"
                 flag = " ★" if self._epochs_no_improve == 0 and self.best_val is not None else ""
                 print(f"Epoch {epoch:3d}/{self.epochs} | "

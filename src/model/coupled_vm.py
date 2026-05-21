@@ -26,6 +26,23 @@ class CoupledVelocityModule(ModelSpec):
     def decoder(self):
         return self.vm1.decoder
 
+    def freeze_backbone(self):
+        """冻结 VM1/VM2，仅 DistanceModule 可训练。
+
+        加载预训练 checkpoint 后调用，防止 VM 权重漂移。
+        """
+        for p in self.vm1.parameters():
+            p.stop_grad()
+        for p in self.vm2.parameters():
+            p.stop_grad()
+
+    def unfreeze_backbone(self):
+        """解冻 VM1/VM2（全参数微调时使用）。"""
+        for p in self.vm1.parameters():
+            p.start_grad()
+        for p in self.vm2.parameters():
+            p.start_grad()
+
     def set_predict(self, is_predict: bool):
         super().set_predict(is_predict)
         self.vm1.set_predict(is_predict)
