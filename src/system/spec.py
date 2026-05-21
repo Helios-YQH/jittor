@@ -307,17 +307,25 @@ class DummySystem():
             if _is_main_process():
                 t_ep = time.time() - t_ep_start
                 mean_loss = sum(epoch_losses) / len(epoch_losses)
-                lr = self.optimizer.param_groups[0].get('lr', '?')
+                # Jittor 的 Adam 初始化时 param_groups 可能不含 'lr' 键，
+                # 回退读取 optimizer.lr 属性，并统一转为 float 格式化
+                lr = self.optimizer.param_groups[0].get('lr', None)
+                if lr is None and hasattr(self.optimizer, 'lr'):
+                    lr = getattr(self.optimizer, 'lr', None)
                 if isinstance(lr, jt.Var):
                     lr = lr.item()
+                if isinstance(lr, (int, float)):
+                    lr_str = f"{lr:.2e}" if lr < 1e-4 else str(lr)
+                else:
+                    lr_str = '?'
                 best_str = f"{self._last_val_loss:.4f}" if self._last_val_loss is not None else "N/A"
                 flag = " ★" if self._epochs_no_improve == 0 and self.best_val is not None else ""
                 print(f"Epoch {epoch:3d}/{self.epochs} | "
                       f"Loss: {mean_loss:.4f} | Val: {best_str}{flag} | "
-                      f"LR: {lr} | {t_ep:.1f}s")
+                      f"LR: {lr_str} | {t_ep:.1f}s")
                 try:
                     with open(self.log_path, 'a') as f:
-                        f.write(f"Epoch {epoch:3d} | Loss: {mean_loss:.4f} | Val: {best_str}{flag} | LR: {lr} | {t_ep:.1f}s\n")
+                        f.write(f"Epoch {epoch:3d} | Loss: {mean_loss:.4f} | Val: {best_str}{flag} | LR: {lr_str} | {t_ep:.1f}s\n")
                 except Exception:
                     pass
                 self._train_loss_history.append(mean_loss)
