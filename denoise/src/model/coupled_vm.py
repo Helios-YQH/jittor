@@ -91,15 +91,10 @@ class CoupledVelocityModule(ModelSpec):
         return pcl
 
     def training_step(self, batch: Dict) -> Dict:
-        """Paper training with Eq.(7), Eq.(10), and Eq.(14).
+        """Phase-aware training with Eq.(7), Eq.(10), and Eq.(14).
 
-        - VM1: predict v_θ⁰(X_t) ≈ X_1 - X_0  (Eq.7)
-        - Coupling: X̃_{t1} should match ideal interpolation X_{t1} (Eq.10, λ₁=10)
-        - VM2: predict v_θ¹(X̃_{t1}) ≈ X_1 - X_0  (Eq.10 first term)
-        - DistanceModule Term 1: d_φ ≈ 1-t (Eq.14 first term)
-        - DistanceModule Term 2: λ₂||X̄₁ - X₁||² (Eq.14 second term, λ₂=200)
-          Runs full Euler integration from X_t through frozen VMs, d_φ gradients
-          flowing through the chain. Only computed when backbone_frozen=True.
+        Phase 1 (backbone unfrozen): VM1 + VM2 + coupling. 2 encoder calls.
+        Phase 2 (backbone frozen):   DistanceModule Term 1 + Term 2. feat0 reused.
         """
         patch_size = batch['pc_state'].shape[-2]
         pc_state = batch['pc_state'].reshape(-1, patch_size, 3)     # X_t
@@ -110,10 +105,10 @@ class CoupledVelocityModule(ModelSpec):
         B, Np, _ = pc_state.shape
         K = self.K  # 2
         target_velocity = pc_clean - pc_noise0  # X_1 - X_0 (constant)
+        F_dim = self.vm1.encoder.embedding_dim
 
-        # ---- VM1: predict velocity from intermediate state X_t ----
+        # ---- VM1 + encoder feature (used by DM in Phase 2) ----
         feat0 = self.vm1.encoder(pc_state)
-        F_dim = feat0.shape[2]
         v0 = self.vm1.decoder(c=feat0.reshape(-1, F_dim)).reshape(B, Np, 3)
         loss_vm1 = ((v0 - target_velocity) ** 2).mean()
 
@@ -121,10 +116,7 @@ class CoupledVelocityModule(ModelSpec):
         jt.gc()
 
         # ---- Coupling straightening loss (paper Eq.10 second term) ----
-        # X̃_{t1} = X_t + (1/K)·v_θ⁰(X_t)  — predicted next state
-        # X_{t1}  = (1 - t₁)·X_0 + t₁·X_1  — ideal interpolated state
-        # t₁ = (t·(K-1) + 1) / K = (t + 1)/2  for K=2
-        t1 = (t_val * (K - 1) + 1) / K  # shape (B, Np, 1)
+        t1 = (t_val * (K - 1) + 1) / K
         X_t1_ideal = (1 - t1) * pc_noise0 + t1 * pc_clean
         X_t1_pred = pc_state + (1.0 / K) * v0
 
@@ -134,9 +126,8 @@ class CoupledVelocityModule(ModelSpec):
         jt.sync_all()
         jt.gc()
 
-        # ---- VM2: refine velocity from predicted next state X̃_{t1} ----
+        # ---- VM2: refine velocity from predicted next state ----
         with jt.no_grad():
-            # Detach X_t1_pred so VM2's gradient doesn't flow back through VM1 again
             X_t1_input = X_t1_pred
         feat1 = self.vm2.encoder(X_t1_input)
         v1 = self.vm2.decoder(c=feat1.reshape(-1, F_dim)).reshape(B, Np, 3)
@@ -145,32 +136,26 @@ class CoupledVelocityModule(ModelSpec):
         jt.sync_all()
         jt.gc()
 
-        # ---- DistanceModule loss (paper Eq.14) ----
-        # Term 1: d_φ(X_t) ≈ ||X_1 - X_t|| / ||X_1 - X_0|| = 1 - t
-        # Term 2: λ₂||X̄₁ - X₁||²  (only when backbone frozen)
-        #   X̄₁ = result of Euler integration X_t → surface using d_φ-scaled VM steps
-
-        # Compute d_φ — must have gradients (backbone encoder frozen via no_grad)
-        with jt.no_grad():
-            feat_dist = self.vm1.encoder(pc_state)
-        d_phi_pred = self.distance_module(feat_dist)  # (B, 1, 1) — HAS grad
-        target_dist = 1.0 - t_val.mean(dim=1, keepdims=True)  # (B, 1, 1)
-        loss_dist_term1 = ((d_phi_pred - target_dist) ** 2).mean()
-
-        # Term 2: Euler integration from X_t through frozen VM1→VM2 chain
-        # d_φ gradients flow through the Euler chain; VM outputs are detached
-        lambda2 = 200.0
+        # ---- DistanceModule (Phase 2 only: backbone frozen) ----
+        # Phase 1: backbone unfrozen → skip DM, VMs are being pretrained
+        # Phase 2: backbone frozen → DM trained with feat0 detached from frozen encoder
+        loss_dist_term1 = 0.0
         loss_dist_term2 = 0.0
         if self._backbone_frozen:
+            # feat0 already computed by frozen VM1 — no grad tracked, safe to reuse
+            d_phi_pred = self.distance_module(feat0)
+            target_dist = 1.0 - t_val.mean(dim=1, keepdims=True)
+            loss_dist_term1 = ((d_phi_pred - target_dist) ** 2).mean()
+
+            # Term 2: Euler integration — d_φ gradients flow through VM chain
+            lambda2 = 200.0
             X_bar = pc_state
-            T = 3 * K   # 6 total steps (3 Euler × 2 VMs)
+            T = 3 * K  # 6 total steps
             for _ in range(3):
-                # VM1 step (frozen, no grad)
                 with jt.no_grad():
                     f0 = self.vm1.encoder(X_bar)
                     v0_step = self.vm1.decoder(c=f0.reshape(-1, F_dim)).reshape(B, Np, 3)
                 X_bar = X_bar + (d_phi_pred / T) * v0_step
-                # VM2 step (frozen, no grad)
                 with jt.no_grad():
                     f1 = self.vm2.encoder(X_bar)
                     v1_step = self.vm2.decoder(c=f1.reshape(-1, F_dim)).reshape(B, Np, 3)
