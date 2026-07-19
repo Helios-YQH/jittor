@@ -204,6 +204,7 @@ def get_knn_idx(x, y, k, offset=0, chunk_size: int = 1024):
     if K > M:
         K = M
     idx_list = []
+    GRAPH_FLUSH_INTERVAL = 16
     for b in range(B):
         x_b = x[b]
         y_b = y[b]
@@ -224,5 +225,8 @@ def get_knn_idx(x, y, k, offset=0, chunk_size: int = 1024):
                 best_dist, top_k = jt.topk(cat_dist, k=K, dim=-1, largest=False)
                 best_idx = cat_idx.gather(dim=-1, index=top_k)
         idx_list.append(best_idx)
+        if (b + 1) % GRAPH_FLUSH_INTERVAL == 0 or (b + 1) == B:
+            jt.sync_all()
+            jt.gc()
     idx = jt.stack(idx_list, dim=0)
     return idx[:, :, offset:]
