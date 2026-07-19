@@ -20,6 +20,8 @@ class CoupledVelocityModule(ModelSpec):
         self.vm2 = VelocityModule(model_config, transform_config)
         self.distance_module = DistanceModule(input_dim=self.vm1.encoder.embedding_dim)
         self._backbone_frozen = False
+        # Phase 1 starts with DM frozen — avoid no-gradient warnings and wasted buffers
+        self.freeze_distance()
 
     @property
     def encoder(self):

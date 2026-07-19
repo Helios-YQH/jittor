@@ -71,18 +71,14 @@ class FeatureExtraction(nn.Module):
         self.embedding_dim = embedding_dim
         self.distance_estimation = distance_estimation
 
-        # Wider channels: 3 → 64 → 128 → 256 → 256
+        # Wider channels: 3 → 64 → 128 → 256
         c1 = embedding_dim // 4   # 64
         c2 = embedding_dim // 2   # 128
         c3 = embedding_dim        # 256
 
         self.conv1 = DynamicEdgeConv(self.input_dim, c1)
         self.conv2 = DynamicEdgeConv(c1, c2)
-        self.conv3 = DynamicEdgeConv(c1 + c2, c3)
-        self.conv4 = DynamicEdgeConv(c3, c3, activation=None)
-
-        # Residual projection from c2 → c3 for skip connection
-        self.proj = nn.Linear(c2, c3)
+        self.conv3 = DynamicEdgeConv(c1 + c2, c3, activation=None)
 
     # ========= edge_index 构建 =========
     def get_edge_index(self, x):
@@ -144,20 +140,8 @@ class FeatureExtraction(nn.Module):
         x_combined_flat = x_combined.reshape(B * N, -1)
         x3 = self.conv3(x_combined_flat, edge_index3)
         x3 = x3.reshape(B, N, -1)
-        jt.sync_all()
-        jt.gc()
 
-        # -------- conv4 --------
-        edge_index4 = self.get_edge_index(x3)
-        x3_flat = x3.reshape(B * N, -1)
-        x4 = self.conv4(x3_flat, edge_index4)
-        x4 = x4.reshape(B, N, -1)
-
-        # Residual skip: project x2 to match x4 dimension
-        residual = self.proj(x2.reshape(B * N, -1)).reshape(B, N, -1)
-        out = x4 + residual
-
-        return out
+        return x3
 
 class Decoder(nn.Module):
     
