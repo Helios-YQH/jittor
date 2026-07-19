@@ -114,6 +114,21 @@ class FeatureExtraction(nn.Module):
     def execute(self, x):
         # x: (B, N, C)
         B, N, _ = x.shape
+        ENCODER_CHUNK = 8
+        if B > ENCODER_CHUNK:
+            results = []
+            for i in range(0, B, ENCODER_CHUNK):
+                chunk = x[i:i + ENCODER_CHUNK]
+                results.append(self._forward_impl(chunk))
+                jt.sync_all()
+                jt.gc()
+            return jt.concat(results, dim=0)
+        else:
+            return self._forward_impl(x)
+
+    def _forward_impl(self, x):
+        # x: (B, N, C)
+        B, N, _ = x.shape
 
         if self.distance_estimation:
             x = self.normalize_patch(x)
