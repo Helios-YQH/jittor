@@ -31,3 +31,7 @@ papers/
 
 # IDE
 .claude/
+
+*.obj
+*.npy
+denoise/baseline/
