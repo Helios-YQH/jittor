@@ -114,7 +114,7 @@ class FeatureExtraction(nn.Module):
     def execute(self, x):
         # x: (B, N, C)
         B, N, _ = x.shape
-        ENCODER_CHUNK = 8
+        ENCODER_CHUNK = 4
         if B > ENCODER_CHUNK:
             results = []
             for i in range(0, B, ENCODER_CHUNK):
@@ -219,7 +219,7 @@ def get_knn_idx(x, y, k, offset=0, chunk_size: int = 1024):
     if K > M:
         K = M
     idx_list = []
-    GRAPH_FLUSH_INTERVAL = 16
+    GRAPH_FLUSH_INTERVAL = 8
     for b in range(B):
         x_b = x[b]
         y_b = y[b]
