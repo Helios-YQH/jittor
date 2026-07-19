@@ -19,7 +19,7 @@ train_transform:
 
     - __target__: patch
       patch_size: 1000
-      num_patches: 16
+      num_patches: 8
       train_cvm_network: False
       sigma_H: 0.02
       noise_type: "gaussian"
@@ -38,7 +38,7 @@ validate_transform: &validate_transform
 
     - __target__: patch
       patch_size: 1000
-      num_patches: 16
+      num_patches: 8
       train_cvm_network: False
       sigma_H: 0.02
       noise_type: "gaussian"

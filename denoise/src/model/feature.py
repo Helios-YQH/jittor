@@ -112,19 +112,8 @@ class FeatureExtraction(nn.Module):
         return pcl / (scale + 1e-8) # type: ignore
 
     def execute(self, x):
-        # x: (B, N, C)
-        B, N, _ = x.shape
-        ENCODER_CHUNK = 4
-        if B > ENCODER_CHUNK:
-            results = []
-            for i in range(0, B, ENCODER_CHUNK):
-                chunk = x[i:i + ENCODER_CHUNK]
-                results.append(self._forward_impl(chunk))
-                jt.sync_all()
-                jt.gc()
-            return jt.concat(results, dim=0)
-        else:
-            return self._forward_impl(x)
+        # x: (B, N, C) — per-conv syncs in _forward_impl keep graph bounded
+        return self._forward_impl(x)
 
     def _forward_impl(self, x):
         # x: (B, N, C)
@@ -138,21 +127,27 @@ class FeatureExtraction(nn.Module):
         x_flat = x.reshape(B * N, -1)
         x1 = self.conv1(x_flat, edge_index1)
         x1 = x1.reshape(B, N, -1)
+        jt.sync_all()
+        jt.gc()
 
         # -------- conv2 --------
         edge_index2 = self.get_edge_index(x1)
         x1_flat = x1.reshape(B * N, -1)
         x2 = self.conv2(x1_flat, edge_index2)
         x2 = x2.reshape(B, N, -1)
+        jt.sync_all()
+        jt.gc()
 
         # -------- conv3 --------
         edge_index3 = self.get_edge_index(x2)
         x_combined = jt.concat([x1, x2], dim=-1)
-        x_combined_flat = x_combined.reshape(B * N, -1) # type: ignore
+        x_combined_flat = x_combined.reshape(B * N, -1)
         x3 = self.conv3(x_combined_flat, edge_index3)
         x3 = x3.reshape(B, N, -1)
+        jt.sync_all()
+        jt.gc()
 
-        # -------- conv4 (new) --------
+        # -------- conv4 --------
         edge_index4 = self.get_edge_index(x3)
         x3_flat = x3.reshape(B * N, -1)
         x4 = self.conv4(x3_flat, edge_index4)
