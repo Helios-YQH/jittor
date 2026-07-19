@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from tqdm import tqdm
 
 import jittor as jt
+import numpy as np
 import os
 import time
 
@@ -94,7 +95,9 @@ class DummySystem():
             self._base_lr = float(optimizer_config.get('lr', 1e-4)) if optimizer_config is not None else 1e-4
             self._scheduler_state = {'last_restart': 0, 'T_cur': 0}
         self.best_val = None
+        self._last_val_loss = None
         self.patience = trainer_config.get('patience', 0) if isinstance(trainer_config, dict) else 0
+        self.validate_every = trainer_config.get('validate_every', 1) if isinstance(trainer_config, dict) else 1
         self._epochs_no_improve = 0
         self._validation_loss = defaultdict(list)
         self._train_loss_history = []
@@ -224,10 +227,14 @@ class DummySystem():
             fig, ax = plt.subplots(figsize=(10, 6))
             epochs = range(len(self._train_loss_history))
             ax.plot(epochs, self._train_loss_history, 'b-', label='Train Loss', linewidth=1.5)
-            if self._val_loss_history:
+            has_val = any(not np.isnan(v) for v in self._val_loss_history)
+            if has_val:
                 ax.plot(epochs, self._val_loss_history, 'r-', label='Val Loss', linewidth=1.5)
-                best_epoch = min(range(len(self._val_loss_history)), key=lambda i: self._val_loss_history[i])
-                ax.axvline(x=best_epoch, color='g', linestyle='--', alpha=0.5, label=f'Best Val ({self.best_val:.4f})')
+                best_epoch = min(range(len(self._val_loss_history)),
+                                key=lambda i: self._val_loss_history[i]
+                                if not np.isnan(self._val_loss_history[i]) else float('inf'))
+                ax.axvline(x=best_epoch, color='g', linestyle='--', alpha=0.5,
+                          label=f'Best Val ({self.best_val:.4f})')
             ax.set_xlabel('Epoch')
             ax.set_ylabel('Loss')
             ax.set_title(f'Training Curve - {self.run_name}')
@@ -376,7 +383,9 @@ class DummySystem():
             self.on_train_epoch_end()
             
             self.model.eval()
-            if validate_dataloader is not None:
+            do_validate = (validate_dataloader is not None and
+                           ((epoch + 1) % self.validate_every == 0 or (epoch + 1) == self.epochs))
+            if do_validate:
                 self.on_validation_epoch_start()
                 if isinstance(validate_dataloader, dict):
                     for name, dataloader in validate_dataloader.items():
@@ -412,22 +421,33 @@ class DummySystem():
                     lr_str = f"{lr:.2e}" if lr < 1e-4 else str(lr)
                 else:
                     lr_str = '?'
-                best_str = f"{self._last_val_loss:.4f}" if self._last_val_loss is not None else "N/A"
-                flag = " ★" if self._epochs_no_improve == 0 and self.best_val is not None else ""
-                print(f"Epoch {epoch:3d}/{self.epochs} | "
-                      f"Loss: {mean_loss:.4f} | Val: {best_str}{flag} | "
-                      f"LR: {lr_str} | {t_ep:.1f}s")
+                if self._last_val_loss is not None:
+                    best_str = f"{self._last_val_loss:.4f}"
+                    flag = " ★" if self._epochs_no_improve == 0 and self.best_val is not None else ""
+                    msg = (f"Epoch {epoch:3d}/{self.epochs} | "
+                           f"Loss: {mean_loss:.4f} | Val: {best_str}{flag} | "
+                           f"LR: {lr_str} | {t_ep:.1f}s")
+                else:
+                    msg = (f"Epoch {epoch:3d}/{self.epochs} | "
+                           f"Loss: {mean_loss:.4f} | "
+                           f"LR: {lr_str} | {t_ep:.1f}s")
+                print(msg)
                 try:
                     with open(self.log_path, 'a') as f:
-                        f.write(f"Epoch {epoch:3d} | Loss: {mean_loss:.4f} | Val: {best_str}{flag} | LR: {lr_str} | {t_ep:.1f}s\n")
+                        f.write(msg + '\n')
                 except Exception:
                     pass
                 self._train_loss_history.append(mean_loss)
                 self._val_loss_history.append(self._last_val_loss if self._last_val_loss is not None else float('nan'))
                 self._plot_curve()
 
-            checkpoint_path = os.path.join(self.run_dir, f'{self.ckpt_save_name}_{epoch}.pkl')
+            # Save latest — overwrites each epoch, always has the most recent weights
+            latest_path = os.path.join(self.run_dir, f'{self.ckpt_save_name}_latest.pkl')
             os.makedirs(self.run_dir, exist_ok=True)
+            if _is_main_process():
+                self.model.save(latest_path)
+            # Also save numbered checkpoint for debugging / rollback
+            checkpoint_path = os.path.join(self.run_dir, f'{self.ckpt_save_name}_{epoch}.pkl')
             if _is_main_process():
                 self.model.save(checkpoint_path)
             jt.sync_all()

@@ -133,7 +133,7 @@ Jittor 自动处理数据分片、参数广播和梯度同步。
 在 `configs/task/train_vm.yaml` 中指定 `load_ckpt`：
 
 ```yaml
-load_ckpt: experiments/vm/checkpoint_20260518_143022/checkpoint_best.pkl
+load_ckpt: experiments/vm/checkpoint_20260518_143022/checkpoint_latest.pkl
 ```
 
 ### 训练配置
@@ -155,7 +155,7 @@ load_ckpt: experiments/vm/checkpoint_20260518_143022/checkpoint_best.pkl
 experiments/vm/
   checkpoint_20260518_143022/   ← 自动生成带时间戳的子目录
     checkpoint_0.pkl            ← 每 epoch 保存一次
-    checkpoint_best.pkl         ← 验证 loss 最低的模型 (★)
+    checkpoint_latest.pkl        ← 每 epoch 覆盖，最新权重
     training.log                ← 训练日志
     training_curve.png          ← 训练曲线图
 ```
@@ -174,7 +174,7 @@ experiments/vm/
 修改 `configs/task/predict_vm.yaml` 中的 `load_ckpt` 指向最佳权重：
 
 ```yaml
-load_ckpt: experiments/vm/checkpoint_20260518_143022/checkpoint_best.pkl
+load_ckpt: experiments/vm/checkpoint_20260518_143022/checkpoint_latest.pkl
 ```
 
 运行推理：

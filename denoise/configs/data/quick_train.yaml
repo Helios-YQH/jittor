@@ -16,18 +16,3 @@ train_dataset:
       shapenet: [
         [./datalist/train.txt, 1.0],
       ]
-
-validate_dataset:
-  shuffle: False
-  batch_size: 1
-  num_workers: 0
-  datapath:
-    input_dataset_dir: ./dataset_train
-    use_prob: False
-    loader: *loader
-    data_name: *data_name
-    ignore_check: True
-    data_path:
-      shapenet: [
-        [./datalist/validate.txt, 1.0],
-      ]

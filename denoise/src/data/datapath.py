@@ -262,7 +262,6 @@ class Datapath(ConfigSpec):
         return res
     
     def __len__(self):
-        if self.use_prob:
-            assert self.num_files is not None, 'num_files is not specified'
-            return self.num_files
+        if self.num_files is not None:
+            return min(self.num_files, len(self.filepaths))
         return len(self.filepaths)

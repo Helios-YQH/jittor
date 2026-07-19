@@ -187,9 +187,9 @@ def main():
         if run_dirs:
             latest_run = run_dirs[-1]
             ckpt_dir = os.path.join(ckpt_root, latest_run)
-            best_ckpt = os.path.join(ckpt_dir, 'checkpoint_best.pkl')
-            if os.path.isfile(best_ckpt):
-                load_ckpt = best_ckpt
+            latest_ckpt = os.path.join(ckpt_dir, 'checkpoint_latest.pkl')
+            if os.path.isfile(latest_ckpt):
+                load_ckpt = latest_ckpt
             else:
                 ckpt_files = sorted([f for f in os.listdir(ckpt_dir) if f.endswith('.pkl')])
                 if ckpt_files:

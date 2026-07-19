@@ -1,7 +1,7 @@
 mode: train
 debug: False
-# Set this to the Phase 1 checkpoint_best.pkl path before running
-load_ckpt: experiments/vm/PHASE1_RUN_NAME/checkpoint_best.pkl
+# Set this to the Phase 1 checkpoint_latest.pkl path before running
+load_ckpt: experiments/vm/PHASE1_RUN_NAME/checkpoint_latest.pkl
 
 components:
   data: train
