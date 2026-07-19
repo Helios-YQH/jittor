@@ -344,14 +344,19 @@ class DummySystem():
         if jt.mpi:
             self.model.mpi_param_broadcast(root=0)
         disable_pbar = not _is_main_process()
+
+        # Create dataloaders ONCE before training — avoid forking workers
+        # after CUDA context is active (CUDA+fork = undefined behavior).
+        train_dataloader = self.dataset_module.train_dataloader()
+        assert train_dataloader is not None, "train_dataloader is None"
+        validate_dataloader = self.dataset_module.validate_dataloader()
+
         for epoch in range(self.epochs):
             # Apply phase-based freeze/unfreeze BEFORE training this epoch
             self._apply_phase(epoch)
 
             self.model.train()
             self.on_train_epoch_start()
-            train_dataloader = self.dataset_module.train_dataloader()
-            assert train_dataloader is not None, "train_dataloader is None"
             pbar = tqdm(train_dataloader, total=len(train_dataloader)//train_dataloader.batch_size, disable=disable_pbar) # type: ignore
             epoch_losses = []
             t_ep_start = time.time()
@@ -371,7 +376,6 @@ class DummySystem():
             self.on_train_epoch_end()
             
             self.model.eval()
-            validate_dataloader = self.dataset_module.validate_dataloader()
             if validate_dataloader is not None:
                 self.on_validation_epoch_start()
                 if isinstance(validate_dataloader, dict):

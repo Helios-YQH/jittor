@@ -4,7 +4,7 @@ loader: &loader obj
 train_dataset:
   shuffle: True
   batch_size: 4
-  num_workers: 2
+  num_workers: 0
   datapath:
     input_dataset_dir: ./dataset_train
     use_prob: True
@@ -20,7 +20,7 @@ train_dataset:
 validate_dataset:
   shuffle: False
   batch_size: 1
-  num_workers: 2
+  num_workers: 0
   datapath:
     input_dataset_dir: ./dataset_train
     use_prob: False
