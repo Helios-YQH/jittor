@@ -1,6 +1,5 @@
 mode: train
 debug: False
-# load_ckpt: experiments/vm/checkpoint_20260519_084730/checkpoint_best.pkl  # uncomment to resume
 
 components:
   data: train
@@ -16,9 +15,9 @@ optimizer:
   lr: 0.0001
 
 trainer:
-  epochs: 350
+  epochs: 250
   run_name: ""
-  # patience: 50       # uncomment to enable early stopping
+  # patience: 50
   scheduler:
     type: cosine_warm_restart
     lr_min: 0.000001
@@ -27,11 +26,5 @@ trainer:
     warmup_epochs: 3
     warmup_start_lr: 0.00001
 
-  # Phase-based training
-  # Phase 1 (epoch 0-150): full training VM1+VM2
-  # Phase 2 (epoch 150-250): freeze backbone, train DistanceModule only
-  # Phase 3 (epoch 250-350): full joint fine-tuning
-  phases:
-    - {start: 0, end: 150, freeze_backbone: false, freeze_distance: false}
-    - {start: 150, end: 250, freeze_backbone: true, freeze_distance: false}
-    - {start: 250, end: 350, freeze_backbone: false, freeze_distance: false}
+  # Phase 1: Full parameter training with Gaussian noise (matches paper)
+  # All parameters trainable — no freeze at start

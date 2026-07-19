@@ -3,13 +3,13 @@ train_transform:
     - __target__: sample
       num_samples: 32768
       num_vertex_samples: 1024
-    
+
     - __target__: normalize_pc
-    
+
     - __target__: add_noise
       noise_std_min: 0.005
       noise_std_max: 0.020
-    
+
     - __target__: linear
       scale: [0.8, 1.2]
       rotate_x_range: [-180, 180]
@@ -17,15 +17,13 @@ train_transform:
       rotate_z_range: [-180, 180]
       scale_p: 0.5
       rotate_p: 0.5
-    
+
     - __target__: patch
       patch_size: 1000
       num_patches: 1
       train_cvm_network: False
       sigma_H: 0.02
-      noise_laplace_weight: 0.6
-      noise_gaussian_weight: 0.2
-      noise_uniform_weight: 0.2
+      noise_type: "gaussian"
 
 validate_transform:
   augments:
@@ -44,9 +42,7 @@ validate_transform:
       num_patches: 1
       train_cvm_network: False
       sigma_H: 0.02
-      noise_laplace_weight: 0.6
-      noise_gaussian_weight: 0.2
-      noise_uniform_weight: 0.2
+      noise_type: "gaussian"
 
 predict_transform:
   augments:

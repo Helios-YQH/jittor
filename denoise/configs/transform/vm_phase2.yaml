@@ -6,8 +6,7 @@ train_transform:
 
     - __target__: normalize_pc
 
-    # add_noise REMOVED: AugmentPatch creates its own X_0 noise internally.
-    # Using sampled_vertices_noisy for seed selection when present (inference-matched).
+    # AugmentPatch creates X_0 with mixed noise for robustness fine-tuning
 
     - __target__: linear
       scale: [0.8, 1.2]
@@ -22,7 +21,7 @@ train_transform:
       num_patches: 16
       train_cvm_network: False
       sigma_H: 0.02
-      noise_type: "gaussian"
+      noise_type: "mixed"
 
 validate_transform: &validate_transform
   augments:
@@ -41,6 +40,6 @@ validate_transform: &validate_transform
       num_patches: 16
       train_cvm_network: False
       sigma_H: 0.02
-      noise_type: "gaussian"
+      noise_type: "mixed"
 
 predict_transform: *validate_transform

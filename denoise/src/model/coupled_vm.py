@@ -19,6 +19,7 @@ class CoupledVelocityModule(ModelSpec):
         self.vm1 = VelocityModule(model_config, transform_config)
         self.vm2 = VelocityModule(model_config, transform_config)
         self.distance_module = DistanceModule(input_dim=self.vm1.encoder.embedding_dim)
+        self._backbone_frozen = False
 
     @property
     def encoder(self):
@@ -34,6 +35,7 @@ class CoupledVelocityModule(ModelSpec):
             p.stop_grad()
         for p in self.vm2.parameters():
             p.stop_grad()
+        self._backbone_frozen = True
 
     def unfreeze_backbone(self):
         """Unfreeze VM1/VM2."""
@@ -41,6 +43,7 @@ class CoupledVelocityModule(ModelSpec):
             p.start_grad()
         for p in self.vm2.parameters():
             p.start_grad()
+        self._backbone_frozen = False
 
     def freeze_distance(self):
         """Freeze DistanceModule. VM1/VM2 remain trainable."""
@@ -90,10 +93,13 @@ class CoupledVelocityModule(ModelSpec):
     def training_step(self, batch: Dict) -> Dict:
         """Paper training with Eq.(7), Eq.(10), and Eq.(14).
 
-        - VM1: predict v_θ⁰(X_t) ≈ X_1 - X_0
-        - Coupling: X̃_{t1} should match ideal interpolation X_{t1} (Eq.10 second term)
-        - VM2: predict v_θ¹(X̃_{t1}) ≈ X_1 - X_0  (refinement)
-        - DistanceModule: estimate d_φ ≈ 1-t (relative distance, Eq.14 first term)
+        - VM1: predict v_θ⁰(X_t) ≈ X_1 - X_0  (Eq.7)
+        - Coupling: X̃_{t1} should match ideal interpolation X_{t1} (Eq.10, λ₁=10)
+        - VM2: predict v_θ¹(X̃_{t1}) ≈ X_1 - X_0  (Eq.10 first term)
+        - DistanceModule Term 1: d_φ ≈ 1-t (Eq.14 first term)
+        - DistanceModule Term 2: λ₂||X̄₁ - X₁||² (Eq.14 second term, λ₂=200)
+          Runs full Euler integration from X_t through frozen VMs, d_φ gradients
+          flowing through the chain. Only computed when backbone_frozen=True.
         """
         patch_size = batch['pc_state'].shape[-2]
         pc_state = batch['pc_state'].reshape(-1, patch_size, 3)     # X_t
@@ -139,15 +145,39 @@ class CoupledVelocityModule(ModelSpec):
         jt.sync_all()
         jt.gc()
 
-        # ---- DistanceModule loss (paper Eq.14 first term) ----
-        # d_φ(X_t) ≈ ||X_1 - X_t|| / ||X_1 - X_0|| = 1 - t
+        # ---- DistanceModule loss (paper Eq.14) ----
+        # Term 1: d_φ(X_t) ≈ ||X_1 - X_t|| / ||X_1 - X_0|| = 1 - t
+        # Term 2: λ₂||X̄₁ - X₁||²  (only when backbone frozen)
+        #   X̄₁ = result of Euler integration X_t → surface using d_φ-scaled VM steps
+
+        # Compute d_φ — must have gradients (backbone encoder frozen via no_grad)
         with jt.no_grad():
             feat_dist = self.vm1.encoder(pc_state)
-        d_phi_pred = self.distance_module(feat_dist)  # (B, 1, 1)
-        target_dist = 1.0 - t_val.mean(dim=1, keepdims=True)  # (B, 1, 1) — mean over patch points
-        loss_dist = ((d_phi_pred - target_dist) ** 2).mean()
+        d_phi_pred = self.distance_module(feat_dist)  # (B, 1, 1) — HAS grad
+        target_dist = 1.0 - t_val.mean(dim=1, keepdims=True)  # (B, 1, 1)
+        loss_dist_term1 = ((d_phi_pred - target_dist) ** 2).mean()
 
-        loss = loss_vm1 + loss_vm2 + loss_coupling + loss_dist
+        # Term 2: Euler integration from X_t through frozen VM1→VM2 chain
+        # d_φ gradients flow through the Euler chain; VM outputs are detached
+        lambda2 = 200.0
+        loss_dist_term2 = 0.0
+        if self._backbone_frozen:
+            X_bar = pc_state
+            T = 3 * K   # 6 total steps (3 Euler × 2 VMs)
+            for _ in range(3):
+                # VM1 step (frozen, no grad)
+                with jt.no_grad():
+                    f0 = self.vm1.encoder(X_bar)
+                    v0_step = self.vm1.decoder(c=f0.reshape(-1, F_dim)).reshape(B, Np, 3)
+                X_bar = X_bar + (d_phi_pred / T) * v0_step
+                # VM2 step (frozen, no grad)
+                with jt.no_grad():
+                    f1 = self.vm2.encoder(X_bar)
+                    v1_step = self.vm2.decoder(c=f1.reshape(-1, F_dim)).reshape(B, Np, 3)
+                X_bar = X_bar + (d_phi_pred / T) * v1_step
+            loss_dist_term2 = lambda2 * ((X_bar - pc_clean) ** 2).mean()
+
+        loss = loss_vm1 + loss_vm2 + loss_coupling + loss_dist_term1 + loss_dist_term2
         return {"loss": loss}
 
     def execute(self, **kwargs) -> Dict:
