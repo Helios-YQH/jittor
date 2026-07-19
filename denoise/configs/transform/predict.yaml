@@ -22,23 +22,31 @@ train_transform:
       patch_size: 1000
       num_patches: 1
       train_cvm_network: False
+      sigma_H: 0.02
+      noise_laplace_weight: 0.6
+      noise_gaussian_weight: 0.2
+      noise_uniform_weight: 0.2
 
 validate_transform:
   augments:
     - __target__: sample
       num_samples: 32768
       num_vertex_samples: 1024
-    
+
     - __target__: normalize_pc
-    
+
     - __target__: add_noise
       noise_std_min: 0.005
       noise_std_max: 0.020
-    
+
     - __target__: patch
       patch_size: 1000
       num_patches: 1
       train_cvm_network: False
+      sigma_H: 0.02
+      noise_laplace_weight: 0.6
+      noise_gaussian_weight: 0.2
+      noise_uniform_weight: 0.2
 
 predict_transform:
   augments:

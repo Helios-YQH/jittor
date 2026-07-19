@@ -92,10 +92,15 @@ if __name__ == "__main__":
     if load_ckpt is not None and model is not None:
         print(f"Loading checkpoint: {load_ckpt}")
         model.load(load_ckpt)
-    # freeze VM1/VM2, train only DistanceModule
-    if hasattr(model, 'freeze_backbone'):
+
+    # Phase-based training: freeze backbone if configured (for DistanceModule-only phase)
+    trainer_config = task.get('trainer', None)
+    if trainer_config and trainer_config.get('freeze_backbone', False) and hasattr(model, 'freeze_backbone'):
         model.freeze_backbone()
         print("Frozen VM1/VM2 backbone, training only DistanceModule.")
+    if trainer_config and trainer_config.get('freeze_distance', False) and hasattr(model, 'freeze_distance'):
+        model.freeze_distance()
+        print("Frozen DistanceModule.")
 
     train_transform = (Transform.parse(**transform_config.get('train_transform', {}))) if model is None else model.get_train_transform()
     validate_transform = (Transform.parse(**transform_config.get('validate_transform', {}))) if model is None else model.get_validate_transform()

@@ -3,13 +3,13 @@ loader: &loader obj
 
 train_dataset:
   shuffle: True
-  batch_size: 72
+  batch_size: 32
   num_workers: 4
   drop_last: True
   datapath:
     input_dataset_dir: ./dataset_train
     use_prob: True
-    num_files: 10000
+    num_files: 20000
     loader: *loader
     data_name: *data_name
     ignore_check: True

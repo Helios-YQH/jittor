@@ -18,16 +18,19 @@ class DistanceModule(nn.Module):
     def execute(self, features):
         """Paper Eq.(13): d_φ = Sigmoid(Max(D_φ(X_t0)))
 
-        Returns a single scalar per patch ∈ [0, 1] estimating the relative
+        Returns a per-patch scalar ∈ [0, 1] estimating the relative
         distance of the input state from the clean surface.
+
+        Args:
+            features: (B, N, F) — per-point features from encoder
+        Returns:
+            d: (B, 1, 1) — one scalar per patch, broadcastable to (B, N, 3)
         """
-        if len(features.shape) == 3:
-            B, N, F = features.shape
-            features = features.reshape(B * N, F)
-        h = self.encoder(features)
-        d = self.head(h)          # (B*N, 1) — per-point raw predictions
-        d = jt.max(d, dim=0)      # Max over all points → single scalar per batch
-        d = jt.sigmoid(d)         # Paper Eq.(13): sigmoid AFTER max
+        B, N, F = features.shape
+        h = self.encoder(features.reshape(B * N, F))  # (B*N, H)
+        d = self.head(h).reshape(B, N, 1)              # (B, N, 1) — per-point raw
+        d = jt.max(d, dim=1, keepdims=True)             # (B, 1, 1) — per-patch max
+        d = jt.sigmoid(d)                                # Paper Eq.(13): sigmoid AFTER max
         return d
 
     def loss(self, pred_distance, true_distance_ratio):

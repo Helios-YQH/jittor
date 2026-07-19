@@ -156,55 +156,95 @@ class AugmentLinear(Augment):
 
 @dataclass(frozen=True)
 class AugmentPatch(Augment):
-    
+
     patch_size: int
-    
+
     num_patches: int
-    
+
     train_cvm_network: bool
-    
+
+    sigma_H: float=0.02
+
+    noise_laplace_weight: float=0.6
+
+    noise_gaussian_weight: float=0.2
+
+    noise_uniform_weight: float=0.2
+
     @classmethod
     def parse(cls, **kwargs) -> 'AugmentPatch':
         cls.check_keys(kwargs)
         return AugmentPatch(**kwargs)
-    
+
     def apply(self, asset: Asset, **kwargs):
-        pc = asset.sampled_vertices
-        pc_noisy = asset.sampled_vertices_noisy
-        
+        pc = asset.sampled_vertices  # clean point cloud (N, 3)
+
         assert pc is not None
-        assert pc_noisy is not None
-        
-        N = pc_noisy.shape[0]
-        
-        seed_idx = np.random.permutation(N)[:self.num_patches]   # (P,)
-        seed_points = pc_noisy[seed_idx]                         # (P, 3)
-        
-        tree = cKDTree(pc_noisy)
-        _, nn_idx = tree.query(seed_points, k=self.patch_size)   # (P, M)
 
-        pat_A = pc_noisy[nn_idx]  # (P, M, 3)
-        pat_B = pc[nn_idx]        # (P, M, 3)
+        N = pc.shape[0]
 
-        l1, l2 = 1e-8, 1.0
-        t = np.random.rand(self.num_patches, self.patch_size, 1)
-        t = (l2 - l1) * t + l1
-        
-        pat_t = t * pat_B + (1 - t) * pat_A
-        seed_points_t = (
-            t[:, 0:1, :] * pc[seed_idx][:, None, :] +
-            (1 - t[:, 0:1, :]) * pc_noisy[seed_idx][:, None, :]
-        )
-        
-        pat_A = pat_A - seed_points_t
-        pat_B = pat_B - seed_points_t
-        pat_t = pat_t - seed_points_t
-        
+        # Select seed points from clean cloud for patch extraction
+        seed_idx = np.random.permutation(N)[:self.num_patches]
+        seed_points = pc[seed_idx]
+
+        # Extract clean patches around seed points
+        tree = cKDTree(pc)
+        _, nn_idx = tree.query(seed_points, k=self.patch_size)
+
+        pat_clean = pc[nn_idx].astype(np.float32)  # X_1: (P, M, 3)
+
+        # Create high-noise variant X_0 with mixed noise types
+        noise_H = self._sample_mixed_noise(pat_clean.shape)
+        pat_noise0 = pat_clean + noise_H  # X_0: (P, M, 3)
+
+        # Sample t ∈ [0, 1], create intermediate state X_t = (1-t)·X_0 + t·X_1
+        t = np.random.rand(self.num_patches, self.patch_size, 1).astype(np.float32)
+        pat_state = (1.0 - t) * pat_noise0 + t * pat_clean  # X_t: (P, M, 3)
+
+        # Compute seed points at each state and center patches
+        # All patches centered at X_t's seed point for consistent velocity computation
+        seed_clean = pat_clean[:, 0:1, :]
+        seed_noise0 = pat_noise0[:, 0:1, :]
+        seed_state = (1.0 - t[:, 0:1, :]) * seed_noise0 + t[:, 0:1, :] * seed_clean
+
+        pat_clean = pat_clean - seed_state
+        pat_noise0 = pat_noise0 - seed_state
+        pat_state = pat_state - seed_state
+
         if asset.meta is None:
             asset.meta = {}
-        asset.meta['pc_noisy'] = pat_A
-        asset.meta['pc_clean'] = pat_B
-        asset.meta['pc_mix'] = pat_t
+        asset.meta['pc_clean'] = pat_clean      # X_1: denoising target
+        asset.meta['pc_noise0'] = pat_noise0    # X_0: high-noise variant
+        asset.meta['pc_state'] = pat_state      # X_t: encoder input
+        asset.meta['t_value'] = t               # for DistanceModule target = 1-t
+
+    def _sample_mixed_noise(self, shape):
+        """Sample noise from a mixture of distributions for training robustness.
+
+        Laplace (60%): matches competition noise distribution
+        Gaussian (20%): original paper noise model
+        Uniform (20%): additional noise type for generalization
+        """
+        P, M, _ = shape
+
+        noise_type = np.random.choice(
+            [0, 1, 2], size=(P, 1, 1),
+            p=[self.noise_laplace_weight, self.noise_gaussian_weight, self.noise_uniform_weight]
+        )
+
+        noise_laplace = np.random.laplace(0, self.sigma_H, size=shape).astype(np.float32)
+        noise_gaussian = np.random.normal(0, self.sigma_H, size=shape).astype(np.float32)
+
+        # Uniform within sphere of radius sigma_H
+        dirs = np.random.randn(*shape).astype(np.float32)
+        dirs = dirs / (np.linalg.norm(dirs, axis=-1, keepdims=True) + 1e-8)
+        radii = np.random.rand(P, M, 1).astype(np.float32) ** (1.0 / 3.0) * self.sigma_H
+        noise_uniform = (dirs * radii).astype(np.float32)
+
+        noise = np.where(noise_type == 0, noise_laplace,
+                np.where(noise_type == 1, noise_gaussian, noise_uniform))
+
+        return noise.astype(np.float32)
 
 def get_augments(*args) -> List[Augment]:
     MAP = {

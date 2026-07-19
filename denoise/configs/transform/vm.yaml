@@ -20,8 +20,12 @@ train_transform:
 
     - __target__: patch
       patch_size: 1000
-      num_patches: 8
+      num_patches: 16
       train_cvm_network: False
+      sigma_H: 0.02
+      noise_laplace_weight: 0.6
+      noise_gaussian_weight: 0.2
+      noise_uniform_weight: 0.2
 
 validate_transform: &validate_transform
   augments:
@@ -37,7 +41,11 @@ validate_transform: &validate_transform
 
     - __target__: patch
       patch_size: 1000
-      num_patches: 8
+      num_patches: 16
       train_cvm_network: False
+      sigma_H: 0.02
+      noise_laplace_weight: 0.6
+      noise_gaussian_weight: 0.2
+      noise_uniform_weight: 0.2
 
 predict_transform: *validate_transform

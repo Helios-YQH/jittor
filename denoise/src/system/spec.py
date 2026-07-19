@@ -89,6 +89,10 @@ class DummySystem():
             self.optimizer = None
         # scheduler config (optional) - read from trainer_config
         self.scheduler_config = trainer_config.get('scheduler') if isinstance(trainer_config, dict) else None
+        self.phases = trainer_config.get('phases', None) if isinstance(trainer_config, dict) else None
+        if self.scheduler_config is not None:
+            self._base_lr = float(optimizer_config.get('lr', 1e-4)) if optimizer_config is not None else 1e-4
+            self._scheduler_state = {'last_restart': 0, 'T_cur': 0}
         self.best_val = None
         self.patience = trainer_config.get('patience', 0) if isinstance(trainer_config, dict) else 0
         self._epochs_no_improve = 0
@@ -249,6 +253,89 @@ class DummySystem():
     
     def on_predict_epoch_end(self):
         pass
+
+    def _apply_phase(self, epoch):
+        """Apply phase-based freeze/unfreeze at epoch boundaries."""
+        if self.phases is None:
+            return
+        current_phase = None
+        for phase in self.phases:
+            if phase['start'] <= epoch < phase['end']:
+                current_phase = phase
+                break
+        if current_phase is None:
+            return
+        model = self.model
+        if current_phase.get('freeze_backbone', False):
+            if hasattr(model, 'freeze_backbone'):
+                model.freeze_backbone()
+        else:
+            if hasattr(model, 'unfreeze_backbone'):
+                model.unfreeze_backbone()
+        if current_phase.get('freeze_distance', False):
+            if hasattr(model, 'freeze_distance'):
+                model.freeze_distance()
+        else:
+            if hasattr(model, 'unfreeze_distance'):
+                model.unfreeze_distance()
+
+    def _apply_scheduler(self, epoch):
+        """CosineAnnealingWarmRestarts with warmup or StepLR."""
+        if self.scheduler_config is None:
+            return
+        try:
+            stype = self.scheduler_config.get('type')
+            if stype == 'cosine_warm_restart':
+                lr_min = float(self.scheduler_config.get('lr_min', 1e-6))
+                T_0 = int(self.scheduler_config.get('T_0', 50))
+                T_mult = int(self.scheduler_config.get('T_mult', 2))
+                warmup_epochs = int(self.scheduler_config.get('warmup_epochs', 0))
+                warmup_start_lr = float(self.scheduler_config.get('warmup_start_lr', self._base_lr * 0.1))
+
+                # Determine current restart cycle period
+                T_i = T_0
+                cycle_start = 0
+                restarts = 0
+                temp_T = T_0
+                while True:
+                    next_cycle_start = cycle_start + temp_T
+                    if epoch < next_cycle_start:
+                        T_i = temp_T
+                        break
+                    cycle_start = next_cycle_start
+                    temp_T *= T_mult
+                    restarts += 1
+                    if restarts > 100:
+                        break
+
+                T_cur = epoch - cycle_start
+
+                # Warmup: linear from warmup_start_lr to base_lr
+                if warmup_epochs > 0 and epoch < warmup_epochs:
+                    progress = epoch / max(warmup_epochs, 1)
+                    new_lr = warmup_start_lr + (self._base_lr - warmup_start_lr) * progress
+                else:
+                    # Cosine annealing within current cycle
+                    effective_epoch = T_cur - warmup_epochs if cycle_start == 0 and T_cur < warmup_epochs else T_cur
+                    effective_T = T_i - warmup_epochs if cycle_start == 0 else T_i
+                    if effective_T <= 0:
+                        effective_T = T_i
+                    progress = min(effective_epoch / max(effective_T, 1), 1.0)
+                    new_lr = lr_min + 0.5 * (self._base_lr - lr_min) * (1.0 + np.cos(np.pi * progress))
+
+                new_lr = max(new_lr, lr_min)
+                for g in self.optimizer.param_groups:
+                    g['lr'] = new_lr
+                return new_lr
+
+            elif stype == 'step':
+                step = int(self.scheduler_config.get('step_size', 30))
+                gamma = float(self.scheduler_config.get('gamma', 0.1))
+                if (epoch + 1) % step == 0:
+                    for g in self.optimizer.param_groups:
+                        g['lr'] = g.get('lr', self._base_lr) * gamma
+        except Exception:
+            pass
     
     def train(self):
         assert self.optimizer is not None, "optimizer is None, cannot train"
@@ -258,6 +345,9 @@ class DummySystem():
             self.model.mpi_param_broadcast(root=0)
         disable_pbar = not _is_main_process()
         for epoch in range(self.epochs):
+            # Apply phase-based freeze/unfreeze BEFORE training this epoch
+            self._apply_phase(epoch)
+
             self.model.train()
             self.on_train_epoch_start()
             train_dataloader = self.dataset_module.train_dataloader()
@@ -340,20 +430,7 @@ class DummySystem():
             jt.gc()
             # update scheduler if configured
             if self.scheduler_config is not None:
-                try:
-                    stype = self.scheduler_config.get('type')
-                    if stype == 'step':
-                        step = int(self.scheduler_config.get('step_size', 30))
-                        gamma = float(self.scheduler_config.get('gamma', 0.1))
-                        if (epoch + 1) % step == 0:
-                            try:
-                                for g in self.optimizer.param_groups:
-                                    g['lr'] = g.get('lr', 1e-4) * gamma
-                            except Exception:
-                                if hasattr(self.optimizer, 'lr'):
-                                    self.optimizer.lr = getattr(self.optimizer, 'lr', 1e-4) * gamma
-                except Exception:
-                    pass
+                new_lr = self._apply_scheduler(epoch)
             # early stopping
             if self.patience > 0 and self._epochs_no_improve >= self.patience:
                 if _is_main_process():

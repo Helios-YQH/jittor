@@ -71,13 +71,18 @@ class FeatureExtraction(nn.Module):
         self.embedding_dim = embedding_dim
         self.distance_estimation = distance_estimation
 
-        self.conv1 = DynamicEdgeConv(self.input_dim, embedding_dim // 8)
-        self.conv2 = DynamicEdgeConv(embedding_dim // 8, embedding_dim // 4)
-        self.conv3 = DynamicEdgeConv(
-            embedding_dim // 8 + embedding_dim // 4,
-            embedding_dim,
-            activation=None
-        )
+        # Wider channels: 3 → 64 → 128 → 256 → 256
+        c1 = embedding_dim // 4   # 64
+        c2 = embedding_dim // 2   # 128
+        c3 = embedding_dim        # 256
+
+        self.conv1 = DynamicEdgeConv(self.input_dim, c1)
+        self.conv2 = DynamicEdgeConv(c1, c2)
+        self.conv3 = DynamicEdgeConv(c1 + c2, c3)
+        self.conv4 = DynamicEdgeConv(c3, c3, activation=None)
+
+        # Residual projection from c2 → c3 for skip connection
+        self.proj = nn.Linear(c2, c3)
 
     # ========= edge_index 构建 =========
     def get_edge_index(self, x):
@@ -87,25 +92,25 @@ class FeatureExtraction(nn.Module):
         knn_idx = knn_idx[:, :, 1:]
         base = jt.arange(B) * N  # (B,)
         base = base.reshape(B, 1, 1)
-        
+
         knn_idx = knn_idx + base  # (B, N, k)
-        
+
         dst = jt.arange(N)
         dst = dst.reshape(1, N, 1).broadcast((B, N, self.k))
         dst = dst + base
-        
+
         src = knn_idx.reshape(-1)
         dst = dst.reshape(-1)
-        
+
         edge_index = jt.stack([src, dst], dim=0)  # (2, E)
-        
+
         return edge_index
-    
+
     def normalize_patch(self, pcl):
         scale = jt.sqrt((pcl ** 2).sum(-1, keepdims=True))
         scale = scale.max(dim=-2, keepdims=True)
         return pcl / (scale + 1e-8) # type: ignore
-    
+
     def execute(self, x):
         # x: (B, N, C)
         B, N, _ = x.shape
@@ -113,7 +118,6 @@ class FeatureExtraction(nn.Module):
         if self.distance_estimation:
             x = self.normalize_patch(x)
 
-        # Compute edge indices only when needed and avoid repeated heavy base arithmetic
         # -------- conv1 --------
         edge_index1 = self.get_edge_index(x)
         x_flat = x.reshape(B * N, -1)
@@ -133,7 +137,17 @@ class FeatureExtraction(nn.Module):
         x3 = self.conv3(x_combined_flat, edge_index3)
         x3 = x3.reshape(B, N, -1)
 
-        return x3
+        # -------- conv4 (new) --------
+        edge_index4 = self.get_edge_index(x3)
+        x3_flat = x3.reshape(B * N, -1)
+        x4 = self.conv4(x3_flat, edge_index4)
+        x4 = x4.reshape(B, N, -1)
+
+        # Residual skip: project x2 to match x4 dimension
+        residual = self.proj(x2.reshape(B * N, -1)).reshape(B, N, -1)
+        out = x4 + residual
+
+        return out
 
 class Decoder(nn.Module):
     

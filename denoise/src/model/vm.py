@@ -41,35 +41,39 @@ class VelocityModule(ModelSpec):
             hidden_size=cfg['decoder_hidden_dim'],
         )
     
-    def get_supervised_loss(self, pc_noisy, pc_mix, pc_clean):
+    def get_supervised_loss(self, pc_state, pc_noise0, pc_clean):
         """
-        pcl_noisy: (B, N, 3)
-        pcl_clean: (B, N, 3)
+        Paper Eq.(7): v_θ(X_t) ≈ X_1 - X_0 (constant velocity field)
+
+        Args:
+            pc_state:  X_t — intermediate state (B, N, 3), encoder input
+            pc_noise0: X_0 — high-noise variant (B, N, 3)
+            pc_clean:  X_1 — clean target (B, N, 3)
         """
-        B, N_noisy, d = pc_mix.shape
-        
-        pnt_idx = get_random_indices(N_noisy, self.num_train_points)
-        
-        # Feature extraction (use pc_noisy for same distribution as inference)
-        feat = self.encoder(pc_noisy)  # (B, N, F)
+        B, N_state, d = pc_state.shape
+
+        pnt_idx = get_random_indices(N_state, self.num_train_points)
+
+        # Feature extraction from X_t (intermediate state) for train/inference consistency
+        feat = self.encoder(pc_state)  # (B, N, F)
         F_dim = feat.shape[2]
-        
+
         # gather
         feat = feat[:, pnt_idx, :]
-        pc_noisy = pc_noisy[:, pnt_idx, :]
-        pc_mix = pc_mix[:, pnt_idx, :]
+        pc_state = pc_state[:, pnt_idx, :]
+        pc_noise0 = pc_noise0[:, pnt_idx, :]
         pc_clean = pc_clean[:, pnt_idx, :]
-        
-        # target
-        grad_dir_t_target = pc_clean - pc_noisy
-        
+
+        # target: constant velocity X_1 - X_0 (paper Eq.7)
+        grad_dir_t_target = pc_clean - pc_noise0
+
         # decoder
         pred_dir = self.decoder(
             c=feat.reshape(-1, F_dim)
         ).reshape(B, len(pnt_idx), d) # type: ignore
-        
+
         loss = (((pred_dir - grad_dir_t_target) ** 2.0) / self.dsm_sigma).sum(dim=-1).mean()
-        
+
         return loss
 
     def deterministic_euler_step(self, pcl_noisy, num_steps: int=3):
@@ -92,13 +96,13 @@ class VelocityModule(ModelSpec):
         return pcl_next
     
     def training_step(self, batch: Dict) -> Dict:
-        patch_size = batch['pc_noisy'].shape[-2]
-        pc_noisy = batch['pc_noisy'].reshape(-1, patch_size, 3)
-        pc_mix = batch['pc_mix'].reshape(-1, patch_size, 3)
+        patch_size = batch['pc_state'].shape[-2]
+        pc_state = batch['pc_state'].reshape(-1, patch_size, 3)
+        pc_noise0 = batch['pc_noise0'].reshape(-1, patch_size, 3)
         pc_clean = batch['pc_clean'].reshape(-1, patch_size, 3)
         loss = self.get_supervised_loss(
-            pc_noisy=pc_noisy,
-            pc_mix=pc_mix,
+            pc_state=pc_state,
+            pc_noise0=pc_noise0,
             pc_clean=pc_clean,
         )
         return {"loss": loss}
@@ -166,9 +170,10 @@ class VelocityModule(ModelSpec):
             if not self.is_predict():
                 assert b.meta is not None
                 res.append({
-                    "pc_noisy": b.meta['pc_noisy'], # (num_patches, patch_size, 3)
-                    "pc_clean": b.meta['pc_clean'],
-                    "pc_mix": b.meta['pc_mix'],
+                    "pc_state": b.meta['pc_state'],     # X_t (P, M, 3) — encoder input
+                    "pc_noise0": b.meta['pc_noise0'],   # X_0 (P, M, 3) — high-noise variant
+                    "pc_clean": b.meta['pc_clean'],     # X_1 (P, M, 3) — clean target
+                    "t_value": b.meta['t_value'],       # t (P, M, 1) — interpolation param
                 })
             else:
                 d = {

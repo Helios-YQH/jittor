@@ -5,17 +5,19 @@ from .distance_module import DistanceModule
 from ..data.asset import Asset
 from typing import Dict, List
 
+
 class CoupledVelocityModule(ModelSpec):
     """Coupled Velocity Module combining two VMs and an optional DistanceModule.
+
     Implements training/predict semantics compatible with the paper (K=2).
+    Training: Eq.(7) for single VM + Eq.(10) coupling loss + Eq.(14) distance loss.
+    Inference: Eq.(15) Euler integration.
     """
     def __init__(self, model_config, transform_config):
         super().__init__(model_config, transform_config)
-        # keep configs and instantiate two VMs
         self.K = 2
         self.vm1 = VelocityModule(model_config, transform_config)
         self.vm2 = VelocityModule(model_config, transform_config)
-        # optional distance module
         self.distance_module = DistanceModule(input_dim=self.vm1.encoder.embedding_dim)
 
     @property
@@ -27,20 +29,27 @@ class CoupledVelocityModule(ModelSpec):
         return self.vm1.decoder
 
     def freeze_backbone(self):
-        """冻结 VM1/VM2，仅 DistanceModule 可训练。
-
-        加载预训练 checkpoint 后调用，防止 VM 权重漂移。
-        """
+        """Freeze VM1/VM2 encoders and decoders. DistanceModule remains trainable."""
         for p in self.vm1.parameters():
             p.stop_grad()
         for p in self.vm2.parameters():
             p.stop_grad()
 
     def unfreeze_backbone(self):
-        """解冻 VM1/VM2（全参数微调时使用）。"""
+        """Unfreeze VM1/VM2."""
         for p in self.vm1.parameters():
             p.start_grad()
         for p in self.vm2.parameters():
+            p.start_grad()
+
+    def freeze_distance(self):
+        """Freeze DistanceModule. VM1/VM2 remain trainable."""
+        for p in self.distance_module.parameters():
+            p.stop_grad()
+
+    def unfreeze_distance(self):
+        """Unfreeze DistanceModule."""
+        for p in self.distance_module.parameters():
             p.start_grad()
 
     def set_predict(self, is_predict: bool):
@@ -48,10 +57,10 @@ class CoupledVelocityModule(ModelSpec):
         self.vm1.set_predict(is_predict)
         self.vm2.set_predict(is_predict)
 
-    def get_supervised_loss(self, pc_noisy, pc_mix, pc_clean):
-        # Fallback to single-VM supervised loss averaged
-        loss1 = self.vm1.get_supervised_loss(pc_noisy, pc_mix, pc_clean)
-        loss2 = self.vm2.get_supervised_loss(pc_noisy, pc_mix, pc_clean)
+    def get_supervised_loss(self, pc_state, pc_noise0, pc_clean):
+        """Fallback: average VM1 and VM2 supervised losses."""
+        loss1 = self.vm1.get_supervised_loss(pc_state, pc_noise0, pc_clean)
+        loss2 = self.vm2.get_supervised_loss(pc_state, pc_noise0, pc_clean)
         return 0.5 * (loss1 + loss2)
 
     def deterministic_euler_step(self, pcl_noisy, num_steps=3):
@@ -62,9 +71,9 @@ class CoupledVelocityModule(ModelSpec):
         B, P, d = pcl_noisy.shape
         pcl = pcl_noisy
 
-        # Compute distance scalar from initial state (paper: d_φ(X̂_M/T))
-        feat_init = self.vm1.encoder(pcl)  # (B, P, F)
-        d_phi = self.distance_module(feat_init)  # scalar ∈ [0,1] per batch
+        # Compute per-patch distance scalar from initial state
+        feat_init = self.vm1.encoder(pcl)        # (B, P, F)
+        d_phi = self.distance_module(feat_init)  # (B, 1, 1)
 
         T = num_steps * self.K  # 6
         for _ in range(num_steps):
@@ -79,50 +88,66 @@ class CoupledVelocityModule(ModelSpec):
         return pcl
 
     def training_step(self, batch: Dict) -> Dict:
-        patch_size = batch['pc_noisy'].shape[-2]
-        pc_noisy = batch['pc_noisy'].reshape(-1, patch_size, 3)
-        pc_mix = batch['pc_mix'].reshape(-1, patch_size, 3)
-        pc_clean = batch['pc_clean'].reshape(-1, patch_size, 3)
+        """Paper training with Eq.(7), Eq.(10), and Eq.(14).
 
-        B, Np, _ = pc_noisy.shape
+        - VM1: predict v_θ⁰(X_t) ≈ X_1 - X_0
+        - Coupling: X̃_{t1} should match ideal interpolation X_{t1} (Eq.10 second term)
+        - VM2: predict v_θ¹(X̃_{t1}) ≈ X_1 - X_0  (refinement)
+        - DistanceModule: estimate d_φ ≈ 1-t (relative distance, Eq.14 first term)
+        """
+        patch_size = batch['pc_state'].shape[-2]
+        pc_state = batch['pc_state'].reshape(-1, patch_size, 3)     # X_t
+        pc_noise0 = batch['pc_noise0'].reshape(-1, patch_size, 3)   # X_0
+        pc_clean = batch['pc_clean'].reshape(-1, patch_size, 3)     # X_1
+        t_val = batch['t_value'].reshape(-1, patch_size, 1)         # t
 
-        # VM1: 学习从 pc_noisy → pc_clean 的速度场
-        loss_vm1 = self.vm1.get_supervised_loss(pc_noisy, pc_mix, pc_clean)
-        # 分断图：执行并清空 loss_vm1 累积的算子，防止后续 no_grad encoder
-        # 再叠加后总图超过 Jittor 融合阈值（触发 6GB+ 中间张量分配）
+        B, Np, _ = pc_state.shape
+        K = self.K  # 2
+        target_velocity = pc_clean - pc_noise0  # X_1 - X_0 (constant)
+
+        # ---- VM1: predict velocity from intermediate state X_t ----
+        feat0 = self.vm1.encoder(pc_state)
+        F_dim = feat0.shape[2]
+        v0 = self.vm1.decoder(c=feat0.reshape(-1, F_dim)).reshape(B, Np, 3)
+        loss_vm1 = ((v0 - target_velocity) ** 2).mean()
+
         jt.sync_all()
         jt.gc()
 
-        # VM2: 学习从 X_t1 → pc_clean 的修正速度场
-        with jt.no_grad():
-            v0 = self.vm1.decoder(
-                c=self.vm1.encoder(pc_mix).reshape(-1, self.vm1.encoder.embedding_dim)
-            ).reshape(B, Np, 3)
-            X_t1 = pc_noisy + (1.0 / self.K) * v0
+        # ---- Coupling straightening loss (paper Eq.10 second term) ----
+        # X̃_{t1} = X_t + (1/K)·v_θ⁰(X_t)  — predicted next state
+        # X_{t1}  = (1 - t₁)·X_0 + t₁·X_1  — ideal interpolated state
+        # t₁ = (t·(K-1) + 1) / K = (t + 1)/2  for K=2
+        t1 = (t_val * (K - 1) + 1) / K  # shape (B, Np, 1)
+        X_t1_ideal = (1 - t1) * pc_noise0 + t1 * pc_clean
+        X_t1_pred = pc_state + (1.0 / K) * v0
+
+        lambda1 = 10.0
+        loss_coupling = lambda1 * ((X_t1_pred - X_t1_ideal) ** 2).mean()
+
         jt.sync_all()
         jt.gc()
 
-        loss_vm2 = self.vm2.get_supervised_loss(X_t1, X_t1, pc_clean)
-
-        # DistanceModule loss (paper Eq.(14), first term)
-        # X_0 = pc_clean + Laplace(0, sigma_H)  [high-noise variant]
-        # X_t0 = (1-t)*X_0 + t*pc_clean          [intermediate state]
-        # target = ||pc_clean - X_t0|| / ||pc_clean - X_0|| = 1 - t
-        sigma_H = 0.02
-        import numpy as np
-        high_noise_np = np.random.laplace(0, sigma_H, size=pc_clean.shape).astype(np.float32)
-        high_noise = jt.array(high_noise_np)
-        X_0 = pc_clean + high_noise
-        t = float(np.random.uniform(0, 1))
-        X_t0 = (1.0 - t) * X_0 + t * pc_clean
-
+        # ---- VM2: refine velocity from predicted next state X̃_{t1} ----
         with jt.no_grad():
-            feat_dist = self.vm1.encoder(X_t0)  # (B, Np, F)
-        d_phi_pred = self.distance_module(feat_dist)
-        target_dist = 1.0 - t
+            # Detach X_t1_pred so VM2's gradient doesn't flow back through VM1 again
+            X_t1_input = X_t1_pred
+        feat1 = self.vm2.encoder(X_t1_input)
+        v1 = self.vm2.decoder(c=feat1.reshape(-1, F_dim)).reshape(B, Np, 3)
+        loss_vm2 = ((v1 - target_velocity) ** 2).mean()
+
+        jt.sync_all()
+        jt.gc()
+
+        # ---- DistanceModule loss (paper Eq.14 first term) ----
+        # d_φ(X_t) ≈ ||X_1 - X_t|| / ||X_1 - X_0|| = 1 - t
+        with jt.no_grad():
+            feat_dist = self.vm1.encoder(pc_state)
+        d_phi_pred = self.distance_module(feat_dist)  # (B, 1, 1)
+        target_dist = 1.0 - t_val.mean(dim=1, keepdims=True)  # (B, 1, 1) — mean over patch points
         loss_dist = ((d_phi_pred - target_dist) ** 2).mean()
 
-        loss = loss_vm1 + loss_vm2 + loss_dist
+        loss = loss_vm1 + loss_vm2 + loss_coupling + loss_dist
         return {"loss": loss}
 
     def execute(self, **kwargs) -> Dict:
@@ -173,6 +198,4 @@ class CoupledVelocityModule(ModelSpec):
         return res
 
     def process_fn(self, batch: List[Asset]) -> List[Dict]:
-        # Reuse the same data processing logic as the base VelocityModule
-        # since coupled model inputs are identical.
         return self.vm1.process_fn(batch)
