@@ -1,26 +1,33 @@
-# Python 虚拟环境
+# Python
 .venv/
 venv/
 env/
-
-# Python 缓存
 __pycache__/
 *.py[cod]
-
-# 环境变量（如有敏感信息）
 .env
 
+# Data (placed relative to denoise/)
 dataset_train/
 dataset_test_noisy/
 datalist/
+warmup/data/
+
+# Outputs
 results/
-experiments/
+**/experiments/
 tmp_predict/
+vis_output/
+warmup/model/
+warmup/result/
+warmup/curve/
+
+# Papers (large PDFs)
+papers/
+
+# Archives
 *.zip
-vis_output/
+*.tar.gz
+*.pkl
 
-vis_output/
-
-dataset_train.tar.gz
-
-docs/
+# IDE
+.claude/
