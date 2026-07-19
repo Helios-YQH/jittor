@@ -18,7 +18,9 @@ from src.model.parse import get_model
 
 
 def load_cfg(path):
-    return OmegaConf.to_container(OmegaConf.load(path.removesuffix('.yaml') + '.yaml'))
+    if not path.endswith(('.yaml', '.yml')):
+        path += '.yaml'
+    return OmegaConf.to_container(OmegaConf.load(path))
 
 
 def main():

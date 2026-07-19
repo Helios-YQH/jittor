@@ -55,9 +55,8 @@ def parse_args():
 def load_config(label, path=None):
     if path is None:
         path = label
-    if path.endswith('.yaml'):
-        path = path.removesuffix('.yaml')
-    path += '.yaml'
+    if not path.endswith(('.yaml', '.yml')):
+        path += '.yaml'
     return OmegaConf.to_container(OmegaConf.load(path))
 
 

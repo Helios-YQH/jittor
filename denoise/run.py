@@ -17,9 +17,8 @@ from src.model.parse import get_model
 from src.system.parse import get_system, get_writer
 
 def load(task: str, path: str) -> Dict:
-    if path.endswith('.yaml'):
-        path = path.removesuffix('.yaml')
-    path += '.yaml'
+    if not path.endswith(('.yaml', '.yml')):
+        path += '.yaml'
     print(f"\033[92mload {task} config: {path}\033[0m")
     return OmegaConf.to_container(OmegaConf.load(path)) # type: ignore
 
