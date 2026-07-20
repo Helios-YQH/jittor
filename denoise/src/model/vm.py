@@ -10,7 +10,8 @@ from .spec import ModelSpec
 from ..data.asset import Asset
 
 def get_random_indices(n, m):
-    assert m < n
+    if m >= n:
+        return jt.array(np.arange(n)).int32()
     idx = np.random.permutation(n)[:m]
     return jt.array(idx).int32()
 
