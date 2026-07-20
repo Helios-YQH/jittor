@@ -17,21 +17,17 @@ optimizer:
   lr: 0.00005
 
 trainer:
-  epochs: 100
+  epochs: 18
   run_name: "phase2"
-  validate_every: 10
-  # patience: 30
   scheduler:
     type: cosine_warm_restart
     lr_min: 0.000001
-    T_0: 25
-    T_mult: 2
-    warmup_epochs: 2
+    T_0: 18
+    T_mult: 1
+    warmup_epochs: 1
     warmup_start_lr: 0.000005
 
-  # Phase 2: DistanceModule training + joint fine-tune with mixed noise
-  # Phase 2a (epoch 0-50): freeze VM1/VM2 → train DistanceModule (Eq.14 with Term 2)
-  # Phase 2b (epoch 50-100): unfreeze all → joint fine-tune (Eq.7 + Eq.10 + Eq.14)
+  # Tight Phase 2: 5e DM warmup (no Term2) + 13e joint finetune (mixed noise)
   phases:
-    - {start: 0, end: 50, freeze_backbone: true, freeze_distance: false}
-    - {start: 50, end: 100, freeze_backbone: false, freeze_distance: false}
+    - {start: 0, end: 5, freeze_backbone: true, freeze_distance: false}
+    - {start: 5, end: 18, freeze_backbone: false, freeze_distance: false}

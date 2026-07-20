@@ -113,32 +113,15 @@ class CoupledVelocityModule(ModelSpec):
         target_velocity = pc_clean - pc_noise0
 
         if self._backbone_frozen:
-            # ---- Phase 2a: DistanceModule only (backbone frozen) ----
-            # Use frozen VM1 encoder to extract features (detached, no grad)
+            # ---- Phase 2a: DistanceModule warmup (backbone frozen) ----
+            # Term 1 only — 1 encoder call + DM forward, same speed as Phase 1.
+            # Term 2 Euler chain skipped: 6 extra encoder calls for marginal gain.
             feat0 = self.vm1.encoder(pc_state)
             jt.sync_all(); jt.gc()
 
-            # Term 1: d_φ ≈ 1-t
             d_phi_pred = self.distance_module(feat0)
             target_dist = 1.0 - t_val.mean(dim=1, keepdims=True)
-            loss_dist_term1 = ((d_phi_pred - target_dist) ** 2).mean()
-
-            # Term 2: Euler integration — d_φ gradients flow through VM chain
-            lambda2 = 200.0
-            X_bar = pc_state
-            T = 3 * K  # 6 total steps
-            for _ in range(3):
-                with jt.no_grad():
-                    f0 = self.vm1.encoder(X_bar)
-                    v0_step = self.vm1.decoder(c=f0.reshape(-1, F_dim)).reshape(B, Np, 3)
-                X_bar = X_bar + (d_phi_pred / T) * v0_step
-                with jt.no_grad():
-                    f1 = self.vm2.encoder(X_bar)
-                    v1_step = self.vm2.decoder(c=f1.reshape(-1, F_dim)).reshape(B, Np, 3)
-                X_bar = X_bar + (d_phi_pred / T) * v1_step
-            loss_dist_term2 = lambda2 * ((X_bar - pc_clean) ** 2).mean()
-
-            loss = loss_dist_term1 + loss_dist_term2
+            loss = ((d_phi_pred - target_dist) ** 2).mean()
             return {"loss": loss}
 
         # ---- Phase 1 or 2b: VM training (DM frozen in P1, active in P2b) ----
