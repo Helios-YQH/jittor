@@ -114,14 +114,34 @@ class CoupledVelocityModule(ModelSpec):
 
         if self._backbone_frozen:
             # ---- Phase 2a: DistanceModule warmup (backbone frozen) ----
-            # Term 1 only — 1 encoder call + DM forward, same speed as Phase 1.
-            # Term 2 Euler chain skipped: 6 extra encoder calls for marginal gain.
+            # Term 1: d_φ ≈ 1-t.  1 encoder + DM forward.
+            # Term 2: λ₂‖X̄₁-X₁‖² with 2-step Euler (4 no_grad encoders vs old 6).
+            # Gradients: d_φ flows through the Euler chain → learns to scale steps
+            # for convergence, not just match (1-t).
             feat0 = self.vm1.encoder(pc_state)
             jt.sync_all(); jt.gc()
 
             d_phi_pred = self.distance_module(feat0)
             target_dist = 1.0 - t_val.mean(dim=1, keepdims=True)
-            loss = ((d_phi_pred - target_dist) ** 2).mean()
+            loss_dist_term1 = ((d_phi_pred - target_dist) ** 2).mean()
+
+            # Term 2: 2 Euler steps × 2 VMs = 4 no_grad encoder calls
+            lambda2 = 200.0
+            X_bar = pc_state
+            T = 2 * K  # 4 total steps
+            for _ in range(2):
+                with jt.no_grad():
+                    f0 = self.vm1.encoder(X_bar)
+                    v0_step = self.vm1.decoder(c=f0.reshape(-1, F_dim)).reshape(B, Np, 3)
+                X_bar = X_bar + (d_phi_pred / T) * v0_step
+                with jt.no_grad():
+                    f1 = self.vm2.encoder(X_bar)
+                    v1_step = self.vm2.decoder(c=f1.reshape(-1, F_dim)).reshape(B, Np, 3)
+                X_bar = X_bar + (d_phi_pred / T) * v1_step
+            loss_dist_term2 = lambda2 * ((X_bar - pc_clean) ** 2).mean()
+
+            loss = loss_dist_term1 + loss_dist_term2
+            return {"loss": loss}
             return {"loss": loss}
 
         # ---- Phase 1 or 2b: VM training (DM frozen in P1, active in P2b) ----

@@ -1,6 +1,5 @@
 mode: train
 debug: False
-# Set this to the Phase 1 checkpoint_latest.pkl path before running
 load_ckpt: experiments/vm/checkpoint_20260719_232813/checkpoint_latest.pkl
 
 components:
@@ -17,17 +16,17 @@ optimizer:
   lr: 0.00005
 
 trainer:
-  epochs: 18
+  epochs: 30
   run_name: "phase2"
   scheduler:
     type: cosine_warm_restart
     lr_min: 0.000001
-    T_0: 18
+    T_0: 25
     T_mult: 1
-    warmup_epochs: 1
+    warmup_epochs: 3
     warmup_start_lr: 0.000005
 
-  # Tight Phase 2: 5e DM warmup (no Term2) + 13e joint finetune (mixed noise)
+  # Phase 2: 5e DM warmup (Term1+Term2, 2 Euler steps) + 25e joint finetune (mixed noise)
   phases:
     - {start: 0, end: 5, freeze_backbone: true, freeze_distance: false}
-    - {start: 5, end: 18, freeze_backbone: false, freeze_distance: false}
+    - {start: 5, end: 30, freeze_backbone: false, freeze_distance: false}
