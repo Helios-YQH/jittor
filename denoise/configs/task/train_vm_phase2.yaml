@@ -4,7 +4,7 @@ debug: False
 load_ckpt: experiments/vm/PHASE1_RUN_NAME/checkpoint_latest.pkl
 
 components:
-  data: train
+  data: train_phase2
   transform: vm_phase2
   system: vm
   model: vm
@@ -19,6 +19,7 @@ optimizer:
 trainer:
   epochs: 100
   run_name: "phase2"
+  validate_every: 10
   # patience: 30
   scheduler:
     type: cosine_warm_restart

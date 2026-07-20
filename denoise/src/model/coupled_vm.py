@@ -51,11 +51,13 @@ class CoupledVelocityModule(ModelSpec):
         """Freeze DistanceModule. VM1/VM2 remain trainable."""
         for p in self.distance_module.parameters():
             p.stop_grad()
+        self._distance_frozen = True
 
     def unfreeze_distance(self):
         """Unfreeze DistanceModule."""
         for p in self.distance_module.parameters():
             p.start_grad()
+        self._distance_frozen = False
 
     def set_predict(self, is_predict: bool):
         super().set_predict(is_predict)
@@ -95,8 +97,9 @@ class CoupledVelocityModule(ModelSpec):
     def training_step(self, batch: Dict) -> Dict:
         """Phase-aware training with Eq.(7), Eq.(10), and Eq.(14).
 
-        Phase 1 (backbone unfrozen): VM1 + VM2 + coupling. 2 encoder calls.
-        Phase 2 (backbone frozen):   DistanceModule Term 1 + Term 2. feat0 reused.
+        Phase 1 (backbone unfrozen, DM frozen): VM1+VM2+coupling. 2 encoder calls.
+        Phase 2a (backbone frozen): DM Term1+Term2, feat0 from frozen VM1.
+        Phase 2b (all unfrozen): VM1+VM2+coupling+DM Term1. 2 encoder calls.
         """
         patch_size = batch['pc_state'].shape[-2]
         pc_state = batch['pc_state'].reshape(-1, patch_size, 3)     # X_t
@@ -106,45 +109,16 @@ class CoupledVelocityModule(ModelSpec):
 
         B, Np, _ = pc_state.shape
         K = self.K  # 2
-        target_velocity = pc_clean - pc_noise0  # X_1 - X_0 (constant)
         F_dim = self.vm1.encoder.embedding_dim
+        target_velocity = pc_clean - pc_noise0
 
-        # ---- VM1 + encoder feature (used by DM in Phase 2) ----
-        feat0 = self.vm1.encoder(pc_state)
-        v0 = self.vm1.decoder(c=feat0.reshape(-1, F_dim)).reshape(B, Np, 3)
-        loss_vm1 = ((v0 - target_velocity) ** 2).mean()
-
-        jt.sync_all()
-        jt.gc()
-
-        # ---- Coupling straightening loss (paper Eq.10 second term) ----
-        t1 = (t_val * (K - 1) + 1) / K
-        X_t1_ideal = (1 - t1) * pc_noise0 + t1 * pc_clean
-        X_t1_pred = pc_state + (1.0 / K) * v0
-
-        lambda1 = 10.0
-        loss_coupling = lambda1 * ((X_t1_pred - X_t1_ideal) ** 2).mean()
-
-        jt.sync_all()
-        jt.gc()
-
-        # ---- VM2: refine velocity from predicted next state ----
-        with jt.no_grad():
-            X_t1_input = X_t1_pred
-        feat1 = self.vm2.encoder(X_t1_input)
-        v1 = self.vm2.decoder(c=feat1.reshape(-1, F_dim)).reshape(B, Np, 3)
-        loss_vm2 = ((v1 - target_velocity) ** 2).mean()
-
-        jt.sync_all()
-        jt.gc()
-
-        # ---- DistanceModule (Phase 2 only: backbone frozen) ----
-        # Phase 1: backbone unfrozen → skip DM, VMs are being pretrained
-        # Phase 2: backbone frozen → DM trained with feat0 detached from frozen encoder
-        loss_dist_term1 = 0.0
-        loss_dist_term2 = 0.0
         if self._backbone_frozen:
-            # feat0 already computed by frozen VM1 — no grad tracked, safe to reuse
+            # ---- Phase 2a: DistanceModule only (backbone frozen) ----
+            # Use frozen VM1 encoder to extract features (detached, no grad)
+            feat0 = self.vm1.encoder(pc_state)
+            jt.sync_all(); jt.gc()
+
+            # Term 1: d_φ ≈ 1-t
             d_phi_pred = self.distance_module(feat0)
             target_dist = 1.0 - t_val.mean(dim=1, keepdims=True)
             loss_dist_term1 = ((d_phi_pred - target_dist) ** 2).mean()
@@ -163,6 +137,40 @@ class CoupledVelocityModule(ModelSpec):
                     v1_step = self.vm2.decoder(c=f1.reshape(-1, F_dim)).reshape(B, Np, 3)
                 X_bar = X_bar + (d_phi_pred / T) * v1_step
             loss_dist_term2 = lambda2 * ((X_bar - pc_clean) ** 2).mean()
+
+            loss = loss_dist_term1 + loss_dist_term2
+            return {"loss": loss}
+
+        # ---- Phase 1 or 2b: VM training (DM frozen in P1, active in P2b) ----
+        feat0 = self.vm1.encoder(pc_state)
+        v0 = self.vm1.decoder(c=feat0.reshape(-1, F_dim)).reshape(B, Np, 3)
+        loss_vm1 = ((v0 - target_velocity) ** 2).mean()
+        jt.sync_all(); jt.gc()
+
+        # Coupling (Eq.10)
+        t1 = (t_val * (K - 1) + 1) / K
+        X_t1_ideal = (1 - t1) * pc_noise0 + t1 * pc_clean
+        X_t1_pred = pc_state + (1.0 / K) * v0
+        lambda1 = 10.0
+        loss_coupling = lambda1 * ((X_t1_pred - X_t1_ideal) ** 2).mean()
+        jt.sync_all(); jt.gc()
+
+        # VM2 refinement
+        with jt.no_grad():
+            X_t1_input = X_t1_pred
+        feat1 = self.vm2.encoder(X_t1_input)
+        v1 = self.vm2.decoder(c=feat1.reshape(-1, F_dim)).reshape(B, Np, 3)
+        loss_vm2 = ((v1 - target_velocity) ** 2).mean()
+        jt.sync_all(); jt.gc()
+
+        # DistanceModule (Phase 2b: all unfrozen, DM trained alongside VMs)
+        # feat0 already has grad from VM1 encoder — DM Term 1 can backprop through it
+        loss_dist_term1 = 0.0
+        loss_dist_term2 = 0.0
+        if not self._distance_frozen:
+            d_phi_pred = self.distance_module(feat0)
+            target_dist = 1.0 - t_val.mean(dim=1, keepdims=True)
+            loss_dist_term1 = ((d_phi_pred - target_dist) ** 2).mean()
 
         loss = loss_vm1 + loss_vm2 + loss_coupling + loss_dist_term1 + loss_dist_term2
         return {"loss": loss}
