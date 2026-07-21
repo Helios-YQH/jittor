@@ -1,0 +1,29 @@
+# Train transform: mixed noise (60% Laplace + 20% Gaussian + 20% Uniform)
+# Proven effective for the competition (67.44 score).
+# sigma_H=0.02 covers the full competition noise range [0.005, 0.020].
+train_transform:
+  augments:
+    - __target__: sample
+      num_samples: 32768
+      num_vertex_samples: 1024
+
+    - __target__: normalize_pc
+
+    - __target__: linear
+      scale: [0.8, 1.2]
+      rotate_x_range: [-180, 180]
+      rotate_y_range: [-180, 180]
+      rotate_z_range: [-180, 180]
+      scale_p: 0.5
+      rotate_p: 0.5
+
+    - __target__: patch
+      patch_size: 1000
+      num_patches: 8
+      train_cvm_network: False
+      sigma_H: 0.02
+      noise_type: "mixed"
+
+predict_transform:
+  augments:
+    - __target__: normalize_pc_predict

@@ -1,11 +1,13 @@
 from .spec import ModelSpec
 from .vm import VelocityModule
 from .coupled_vm import CoupledVelocityModule
+from .score_vm import ScoreVelocityModule
 
 def get_model(model_config, **kwargs) -> ModelSpec:
     MAP = {
         'VelocityModule': VelocityModule,
         'CoupledVelocityModule': CoupledVelocityModule,
+        'ScoreVelocityModule': ScoreVelocityModule,
     }
     __target__ = model_config['__target__']
     del model_config['__target__']
