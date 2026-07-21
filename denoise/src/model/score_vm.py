@@ -17,33 +17,37 @@ from .vm import get_random_indices, patch_based_denoise
 from ..data.asset import Asset
 
 
-def _compute_score_target(pc_state, pc_clean, chunk=32):
-    """Compute score s(x) = NN(x, X_clean) - x by batched pairwise distance.
+def _compute_score_target(pc_state, pc_clean, chunk_knn=128):
+    """Compute score s(x) = NN(x, X_clean) - x by chunked KNN (k=1).
 
-    Chunks over the batch dim to keep memory bounded (~384MB per chunk at chunk=32).
+    Avoids O(N^2) broadcast: uses streaming top-1 over clean-point chunks.
     pc_state: (B, N, 3)   pc_clean: (B, N, 3)
     Returns: (B, N, 3) detached Jittor tensor
     """
     B, N, _ = pc_state.shape
-    targets = []
-    for start in range(0, B, chunk):
-        end = min(start + chunk, B)
-        s = pc_state[start:end]   # (C, N, 3)
-        c = pc_clean[start:end]   # (C, N, 3)
+    for start in range(0, N, chunk_knn):
+        end = min(start + chunk_knn, N)
+        y_chunk = pc_clean[:, start:end, :]       # (B, C, 3)
+        # (B, N, 1, 3) - (B, 1, C, 3) = (B, N, C, 3)
+        diffs = pc_state.unsqueeze(2) - y_chunk.unsqueeze(1)
+        dists = (diffs ** 2).sum(-1)               # (B, N, C)
+        if start == 0:
+            best_dist, best_idx = jt.topk(dists, k=1, dim=-1, largest=False)
+            best_idx = best_idx.squeeze(-1) + start
+        else:
+            cat_dist = jt.concat([best_dist, dists], dim=-1)  # (B, N, old_topk + C)
+            # Build combined indices for current best + new chunk
+            idx_chunk = jt.arange(start, end).unsqueeze(0).unsqueeze(0).broadcast((B, N, end - start))
+            cat_idx = jt.concat([best_idx.unsqueeze(-1), idx_chunk], dim=-1)  # (B, N, old+C)
+            best_dist, top_k = jt.topk(cat_dist, k=1, dim=-1, largest=False)
+            best_idx = cat_idx.gather(dim=-1, index=top_k).squeeze(-1)
 
-        # Pairwise distances: (C, N, N) — ~1M distances per chunk item
-        diffs = s.unsqueeze(2) - c.unsqueeze(1)  # (C, N, N, 3)
-        dists = (diffs ** 2).sum(-1)              # (C, N, N)
-        _, min_idx = jt.argmin(dists, dim=-1)     # (C, N)
+    # Gather nearest clean point per state point
+    batch_base = jt.arange(B).unsqueeze(1) * N   # (B, 1)
+    flat_idx = (best_idx + batch_base).reshape(-1)
+    nn_clean = pc_clean.reshape(-1, 3)[flat_idx].reshape(B, N, 3)
 
-        # Gather nearest clean points
-        C = end - start
-        batch_base = jt.arange(C).unsqueeze(1) * N
-        flat_idx = (min_idx + batch_base).reshape(-1)
-        nn_clean = c.reshape(-1, 3)[flat_idx].reshape(C, N, 3)
-        targets.append(jt.detach(nn_clean - s))
-
-    return jt.concat(targets, dim=0)
+    return jt.detach(nn_clean - pc_state)
 
 
 class ScoreVelocityModule(ModelSpec):
