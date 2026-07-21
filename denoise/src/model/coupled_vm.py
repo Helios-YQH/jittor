@@ -6,32 +6,38 @@ from ..data.asset import Asset
 from typing import Dict, List
 
 
-def _load_weights_from(target_module, source_module):
-    """Copy weights from source_module to target_module.
+def _load_weights_from(target_module, source):
+    """Copy weights from source to target_module.
 
-    Matches parameters by suffix to handle nested module name differences
-    (e.g. 'vm1.encoder.conv1.mlp.0.weight' vs 'encoder.conv1.mlp.0.weight').
+    source can be dict (state_dict) or nn.Module. Matches by suffix
+    to handle nested name differences (vm1./vm2. prefix).
     """
-    # Collect source parameters by name
-    src_by_name = {}
-    for p in source_module.parameters():
-        src_by_name[p.name()] = p
+    if isinstance(source, dict):
+        try:
+            target_module.load_state_dict(source)
+            print(f"  Loaded {len(source)} state_dict keys")
+            return
+        except Exception:
+            pass
+
+    # Build source mapping
+    if isinstance(source, dict):
+        src_by_name = source
+    else:
+        src_by_name = {p.name(): p for p in source.parameters()}
 
     matched = 0
     for tp in target_module.parameters():
         tname = tp.name()
-        # Exact match
         if tname in src_by_name:
             jt.assign(tp, src_by_name[tname])
             matched += 1
             continue
-        # Suffix match: handle vm1./vm2. prefix difference
-        for sname, sp in src_by_name.items():
+        for sname, sv in src_by_name.items():
             if tname.endswith("." + sname) or tname.endswith(sname):
-                jt.assign(tp, sp)
+                jt.assign(tp, sv)
                 matched += 1
                 break
-
     print(f"  Copied {matched}/{len(list(target_module.parameters()))} parameters")
 
 
