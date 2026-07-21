@@ -55,14 +55,15 @@ class CoupledVelocityModule(ModelSpec):
         self.vm2 = VelocityModule(model_config, transform_config)
         self.distance_module = DistanceModule(input_dim=self.vm1.encoder.embedding_dim)
         self._backbone_frozen = False
-        # Stage 3 starts with DM frozen — train VM1+VM2+coupling only
-        self.freeze_distance()
+        self._distance_frozen = False
+        # DM starts frozen — will be unfrozen by _apply_phase when configured
 
     def load_pretrained_vms(self, vm1_path, vm2_path):
         """Load pretrained VM1 and VM2 from Stage 1 and Stage 2 checkpoints.
 
         Copies encoder+decoder weights from standalone VelocityModule checkpoints.
-        DistanceModule stays randomly initialized and frozen.
+        DistanceModule stays randomly initialized. Freeze/unfreeze is controlled
+        by trainer phases, not hardcoded here.
         """
         print(f"Loading VM1 from: {vm1_path}")
         vm1_ckpt = jt.load(vm1_path)
@@ -71,7 +72,7 @@ class CoupledVelocityModule(ModelSpec):
         vm2_ckpt = jt.load(vm2_path)
         _load_weights_from(self.vm2, vm2_ckpt)
         self.freeze_distance()
-        print("Pretrained VM1/VM2 loaded, DistanceModule frozen.")
+        print("Pretrained VM1/VM2 loaded.")
 
     @property
     def encoder(self):

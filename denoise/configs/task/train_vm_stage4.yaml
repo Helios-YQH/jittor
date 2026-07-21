@@ -1,0 +1,34 @@
+mode: train
+debug: False
+
+# Stage 4: DistanceModule Training — backbone frozen, only train DM
+# Loads pretrained VM1/VM2 from Stage 1+2 (skip Stage 3 since coupling barely trained)
+load_vm1_ckpt: experiments/vm/stage1_vm1/checkpoint_14.pkl
+load_vm2_ckpt: experiments/vm/stage2_vm2/checkpoint_14.pkl
+
+components:
+  data: train
+  transform: vm_stage1
+  system: vm
+  model: vm_stage3
+
+loss:
+  loss: 1.0
+
+optimizer:
+  __target__: adam
+  lr: 0.0001
+
+trainer:
+  epochs: 20
+  run_name: "stage4_dm"
+  patience: 0
+  freeze_backbone: true
+  unfreeze_distance: true
+  scheduler:
+    type: cosine_warm_restart
+    lr_min: 0.000001
+    T_0: 10
+    T_mult: 2
+    warmup_epochs: 3
+    warmup_start_lr: 0.00001

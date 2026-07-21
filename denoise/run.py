@@ -109,6 +109,9 @@ if __name__ == "__main__":
     if trainer_config and trainer_config.get('freeze_distance', False) and hasattr(model, 'freeze_distance'):
         model.freeze_distance()
         print("Frozen DistanceModule.")
+    if trainer_config and trainer_config.get('unfreeze_distance', False) and hasattr(model, 'unfreeze_distance'):
+        model.unfreeze_distance()
+        print("Unfrozen DistanceModule.")
 
     train_transform = (Transform.parse(**transform_config.get('train_transform', {}))) if model is None else model.get_train_transform()
     validate_transform = (Transform.parse(**transform_config.get('validate_transform', {}))) if model is None else model.get_validate_transform()
