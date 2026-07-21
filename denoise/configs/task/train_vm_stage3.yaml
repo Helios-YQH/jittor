@@ -1,0 +1,32 @@
+mode: train
+debug: False
+
+# Stage 3: Coupled Finetune — load pretrained VM1/VM2, freeze DM, train Eq.(10) coupling
+# Select the best epoch checkpoint from Stage 1 and Stage 2 (usually the last one).
+load_vm1_ckpt: experiments/vm/stage1_vm1/checkpoint_14.pkl
+load_vm2_ckpt: experiments/vm/stage2_vm2/checkpoint_14.pkl
+
+components:
+  data: train
+  transform: vm_stage1
+  system: vm
+  model: vm_stage3
+
+loss:
+  loss: 1.0
+
+optimizer:
+  __target__: adam
+  lr: 0.0001
+
+trainer:
+  epochs: 15
+  run_name: "stage3_coupled"
+  patience: 0
+  scheduler:
+    type: cosine_warm_restart
+    lr_min: 0.000001
+    T_0: 10
+    T_mult: 2
+    warmup_epochs: 3
+    warmup_start_lr: 0.00001

@@ -6,6 +6,35 @@ from ..data.asset import Asset
 from typing import Dict, List
 
 
+def _load_weights_from(target_module, source_module):
+    """Copy weights from source_module to target_module.
+
+    Matches parameters by suffix to handle nested module name differences
+    (e.g. 'vm1.encoder.conv1.mlp.0.weight' vs 'encoder.conv1.mlp.0.weight').
+    """
+    # Collect source parameters by name
+    src_by_name = {}
+    for p in source_module.parameters():
+        src_by_name[p.name()] = p
+
+    matched = 0
+    for tp in target_module.parameters():
+        tname = tp.name()
+        # Exact match
+        if tname in src_by_name:
+            jt.assign(tp, src_by_name[tname])
+            matched += 1
+            continue
+        # Suffix match: handle vm1./vm2. prefix difference
+        for sname, sp in src_by_name.items():
+            if tname.endswith("." + sname) or tname.endswith(sname):
+                jt.assign(tp, sp)
+                matched += 1
+                break
+
+    print(f"  Copied {matched}/{len(list(target_module.parameters()))} parameters")
+
+
 class CoupledVelocityModule(ModelSpec):
     """Coupled Velocity Module combining two VMs and an optional DistanceModule.
 
@@ -20,8 +49,23 @@ class CoupledVelocityModule(ModelSpec):
         self.vm2 = VelocityModule(model_config, transform_config)
         self.distance_module = DistanceModule(input_dim=self.vm1.encoder.embedding_dim)
         self._backbone_frozen = False
-        # Phase 1 starts with DM frozen — avoid no-gradient warnings and wasted buffers
+        # Stage 3 starts with DM frozen — train VM1+VM2+coupling only
         self.freeze_distance()
+
+    def load_pretrained_vms(self, vm1_path, vm2_path):
+        """Load pretrained VM1 and VM2 from Stage 1 and Stage 2 checkpoints.
+
+        Copies encoder+decoder weights from standalone VelocityModule checkpoints.
+        DistanceModule stays randomly initialized and frozen.
+        """
+        print(f"Loading VM1 from: {vm1_path}")
+        vm1_ckpt = jt.load(vm1_path)
+        _load_weights_from(self.vm1, vm1_ckpt)
+        print(f"Loading VM2 from: {vm2_path}")
+        vm2_ckpt = jt.load(vm2_path)
+        _load_weights_from(self.vm2, vm2_ckpt)
+        self.freeze_distance()
+        print("Pretrained VM1/VM2 loaded, DistanceModule frozen.")
 
     @property
     def encoder(self):
@@ -142,9 +186,8 @@ class CoupledVelocityModule(ModelSpec):
 
             loss = loss_dist_term1 + loss_dist_term2
             return {"loss": loss}
-            return {"loss": loss}
 
-        # ---- Phase 1 or 2b: VM training (DM frozen in P1, active in P2b) ----
+        # ---- Stage 3: VM training (DM frozen) ----
         feat0 = self.vm1.encoder(pc_state)
         v0 = self.vm1.decoder(c=feat0.reshape(-1, F_dim)).reshape(B, Np, 3)
         loss_vm1 = ((v0 - target_velocity) ** 2).mean()

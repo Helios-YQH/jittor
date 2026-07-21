@@ -92,6 +92,15 @@ if __name__ == "__main__":
         print(f"Loading checkpoint: {load_ckpt}")
         model.load(load_ckpt)
 
+    # Load pretrained VM weights for coupled stages (Stage 3)
+    load_vm1_ckpt = task.get('load_vm1_ckpt', None)
+    load_vm2_ckpt = task.get('load_vm2_ckpt', None)
+    if load_vm1_ckpt is not None and load_vm2_ckpt is not None and model is not None:
+        if hasattr(model, 'load_pretrained_vms'):
+            model.load_pretrained_vms(load_vm1_ckpt, load_vm2_ckpt)
+        else:
+            print("WARNING: model has no load_pretrained_vms method, skipping VM weight loading")
+
     # Phase-based training: freeze backbone if configured (for DistanceModule-only phase)
     trainer_config = task.get('trainer', None)
     if trainer_config and trainer_config.get('freeze_backbone', False) and hasattr(model, 'freeze_backbone'):
