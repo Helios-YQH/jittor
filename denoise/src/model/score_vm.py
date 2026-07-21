@@ -14,6 +14,7 @@ import jittor as jt
 from .spec import ModelSpec
 from .feature import FeatureExtraction, Decoder
 from .vm import get_random_indices, patch_based_denoise
+from ..data.asset import Asset
 
 
 def _compute_score_target(pc_state, pc_clean, chunk=32):
