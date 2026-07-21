@@ -10,6 +10,7 @@ Key differences from StraightPCF:
 from typing import Dict, List
 
 import jittor as jt
+import numpy as np
 
 from .spec import ModelSpec
 from .feature import FeatureExtraction, Decoder
@@ -17,37 +18,26 @@ from .vm import get_random_indices, patch_based_denoise
 from ..data.asset import Asset
 
 
-def _compute_score_target(pc_state, pc_clean, chunk_knn=128):
-    """Compute score s(x) = NN(x, X_clean) - x by chunked KNN (k=1).
+def _compute_score_target_numpy(pc_state, pc_clean):
+    """Score target on CPU: s(x) = NN(x, X_clean) - x.
 
-    Avoids O(N^2) broadcast: uses streaming top-1 over clean-point chunks.
-    pc_state: (B, N, 3)   pc_clean: (B, N, 3)
-    Returns: (B, N, 3) detached Jittor tensor
+    Uses scipy cKDTree — single-threaded, runs on CPU to avoid any Jittor
+    graph accumulation or GPU memory interference.
+
+    pc_state: (B, N, 3) Jittor Var
+    pc_clean: (B, N, 3) Jittor Var
+    Returns: (B, N, 3) Jittor Var (detached, on GPU)
     """
-    B, N, _ = pc_state.shape
-    for start in range(0, N, chunk_knn):
-        end = min(start + chunk_knn, N)
-        y_chunk = pc_clean[:, start:end, :]       # (B, C, 3)
-        # (B, N, 1, 3) - (B, 1, C, 3) = (B, N, C, 3)
-        diffs = pc_state.unsqueeze(2) - y_chunk.unsqueeze(1)
-        dists = (diffs ** 2).sum(-1)               # (B, N, C)
-        if start == 0:
-            best_dist, best_idx = jt.topk(dists, k=1, dim=-1, largest=False)
-            best_idx = best_idx.squeeze(-1) + start
-        else:
-            cat_dist = jt.concat([best_dist, dists], dim=-1)  # (B, N, old_topk + C)
-            # Build combined indices for current best + new chunk
-            idx_chunk = jt.arange(start, end).unsqueeze(0).unsqueeze(0).broadcast((B, N, end - start))
-            cat_idx = jt.concat([best_idx.unsqueeze(-1), idx_chunk], dim=-1)  # (B, N, old+C)
-            best_dist, top_k = jt.topk(cat_dist, k=1, dim=-1, largest=False)
-            best_idx = cat_idx.gather(dim=-1, index=top_k).squeeze(-1)
-
-    # Gather nearest clean point per state point
-    batch_base = jt.arange(B).unsqueeze(1) * N   # (B, 1)
-    flat_idx = (best_idx + batch_base).reshape(-1)
-    nn_clean = pc_clean.reshape(-1, 3)[flat_idx].reshape(B, N, 3)
-
-    return jt.detach(nn_clean - pc_state)
+    from scipy.spatial import cKDTree
+    s_np = pc_state.numpy().astype(np.float64)
+    c_np = pc_clean.numpy().astype(np.float64)
+    B, N, _ = s_np.shape
+    targets = np.empty_like(s_np, dtype=np.float32)
+    for b in range(B):
+        tree = cKDTree(c_np[b])
+        _, nn_idx = tree.query(s_np[b], k=1)
+        targets[b] = c_np[b, nn_idx] - s_np[b]
+    return jt.array(targets).detach()
 
 
 class ScoreVelocityModule(ModelSpec):
@@ -89,8 +79,8 @@ class ScoreVelocityModule(ModelSpec):
 
         B, N_state, d = pc_state.shape
 
-        # Compute score target: s(x) = NN(x, X_clean) - x
-        score_target = _compute_score_target(pc_state, pc_clean)
+        # Compute score target: s(x) = NN(x, X_clean) - x (CPU, scipy ckdtree)
+        score_target = _compute_score_target_numpy(pc_state, pc_clean)
 
         pnt_idx = get_random_indices(N_state, self.num_train_points)
 
