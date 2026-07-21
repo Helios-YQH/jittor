@@ -34,7 +34,7 @@ def _compute_score_target(pc_state, pc_clean, chunk=32):
         # Pairwise distances: (C, N, N) — ~1M distances per chunk item
         diffs = s.unsqueeze(2) - c.unsqueeze(1)  # (C, N, N, 3)
         dists = (diffs ** 2).sum(-1)              # (C, N, N)
-        min_idx = jt.argmin(dists, dim=-1)         # (C, N)
+        _, min_idx = jt.argmin(dists, dim=-1)     # (C, N)
 
         # Gather nearest clean points
         C = end - start
