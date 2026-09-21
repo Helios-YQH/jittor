@@ -279,7 +279,7 @@ The track opened with a qualification round: classify ModelNet40 shapes from 2{,
 
 The final model is a Point Cloud Transformer in the shape of the PCT paper's full architecture~\citep{pct} (${\sim}2.9$M parameters): a convolutional stem, two sample-and-group stages (farthest-point sampling, $k$-NN with $k=32$, local feature aggregation), four offset-attention layers with positional encoding and skip connections, and a max-pooled classifier head. Training used AdamW with warmup-cosine learning rate, label smoothing (0.1), dropout, EMA of the weights, and the standard point-cloud augmentations (random scaling, translation, point dropout, and Gaussian jitter); validation was a fixed 90/10 split.
 
-A minimal PCT cleared the threshold; the meaningful gains came from the hierarchical sample-and-group stages and the augmentation set, while an experiment that added geometric (pairwise-distance) attention biases underperformed and was dropped. On the main track the emphasis inverted: weeks went into architecture and schedule variants while the noise model and the evaluation harness were fixed late.
+The final model ranked 12th in the round. A minimal PCT already cleared the threshold; the meaningful gains came from the hierarchical sample-and-group stages and the augmentation set, while an experiment that added geometric (pairwise-distance) attention biases underperformed and was dropped. On the main track the emphasis inverted: weeks went into architecture and schedule variants while the noise model and the evaluation harness were fixed late.
 
 %=============================================================================
 \section{Lessons Learned}

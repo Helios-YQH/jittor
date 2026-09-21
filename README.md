@@ -9,7 +9,7 @@ A solo entry to the 6th Jittor AI Challenge, implemented in [Jittor](https://git
 | Task | Model | Result |
 |---|---|---|
 | Point-cloud denoising | StraightPCF reproduction: coupled velocity module, ≈0.7M parameters | Best competition score **67.44/100** (CD sub-score 51.9, P2S sub-score 82.9); CD down 51%, P2S down 67% against the noisy input; national top 100 |
-| Shape classification | PCT: 2 sample-and-group stages and 4 offset-attention blocks, ≈2.9M parameters | Passed the qualification round, which required ≥80% test accuracy |
+| Shape classification | PCT: 2 sample-and-group stages and 4 offset-attention blocks, ≈2.9M parameters | Ranked 12th in the warmup round, which required ≥80% test accuracy to qualify |
 
 The denoising numbers come from a held-out split of the training meshes, scored with the competition metric (Chamfer distance and point-to-surface distance, per-sample). They fall short of the accuracy reported in the StraightPCF paper; the report attributes most of the gap to a training-schedule deviation from the paper.
 
@@ -93,6 +93,10 @@ The datasets — ShapeNet meshes for training and pre-noised test clouds — are
 ## Status
 
 The competition ended in 2026. The code is archived as it was; `report/tech_report.pdf` covers the results and the failures.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ## References
 
