@@ -2,6 +2,8 @@
 
 计图挑战赛赛道二热身赛 — 基于 Jittor 框架的 PCT (Point Cloud Transformer) 模型，完成 ModelNet40 三维形状分类任务。
 
+> 技术报告（英文，含方法、工程细节与失败复盘）：[`../report/tech_report.pdf`](../report/tech_report.pdf)
+
 ## 赛题简介
 
 - **任务**：输入 2048 个三维点，预测其所属类别（40 类）

@@ -1,0 +1,339 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Tech report for the Jittor AI Challenge (Track 2): point-cloud denoising
+% with StraightPCF, reproduced in Jittor.
+% Compile:  latexmk -pdf tech_report.tex   (or: pdflatex twice)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\documentclass{article}
+
+% numeric citations, as in the NeurIPS reference style
+\PassOptionsToPackage{numbers, compress}{natbib}
+\usepackage[preprint]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{listings}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  keepspaces=true,
+  breaklines=true,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{gray!60},
+  backgroundcolor=\color{gray!8},
+  xleftmargin=1.5em,
+  xrightmargin=1.5em,
+  aboveskip=1.2em,
+  belowskip=1.2em,
+}
+
+\usepackage{caption}
+\captionsetup{font=small}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\title{Reproducing StraightPCF in Jittor:\\
+Point-Cloud Denoising, and Where the Reproduction Fell Short}
+
+\author{%
+  Yi Hou \\
+  University of Chinese Academy of Sciences\\
+  Beijing, China \\
+  \texttt{houyi25@mails.ucas.ac.cn}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report documents an attempt to reproduce StraightPCF (CVPR 2024), a point-cloud filtering method, in Jittor for Track~2 of the 6th Jittor AI Challenge, together with an honest account of the outcome. The final system is a coupled velocity module of roughly 0.7M parameters that predicts per-point displacements returning noisy samples to the underlying surface, trained on ${\sim}20$k ShapeNet meshes. On a held-out split of the training data it reduces the Chamfer distance by about 51\% and the point-to-surface error by about 67\% relative to the noisy input, corresponding to a best competition score of 67.44/100 and a national top-100 placement. It does not reproduce the paper's reported accuracy, and roughly half of this report is an attempt to explain why: a merged training schedule that left the distance module trained differently from the paper's prescription, noise-model drift away from the interpolation family the method assumes, inference-time repetition that compensated for a mediocre velocity field, and a late score-based detour that consumed the final weeks. What the effort did produce is a measured Jittor implementation of the primitives this family of methods needs --- chunked KNN, GPU farthest-point sampling, scatter-mean edge convolutions, MPI data parallelism, and an evaluation harness --- which is where most of the transferable content of this report lies.
+\end{abstract}
+
+%=============================================================================
+\section{Introduction}
+%=============================================================================
+
+The 6th Jittor AI Challenge is a competition organized around Jittor, a JIT-compiled deep-learning framework developed at Tsinghua University. Track~2 asked entrants to denoise point clouds sampled from ShapeNet meshes: given a noisy cloud, predict a displacement for every point so that the displaced cloud lies close to the original surface. The task had to be solved in Jittor, the training data was a provided subset of ${\sim}20$k ShapeNet meshes, and submissions were scored on Chamfer distance (CD) and point-to-surface distance (P2S) relative to the noisy input. This report describes a solo entry: a reproduction of StraightPCF~\citep{straightpcf}, a CVPR 2024 method that models filtering as an optimal-transport-like flow with a learned constant velocity field.
+
+The outcome, stated plainly: the system works, in the sense that it removes a large fraction of the noise and was accepted for scoring, but it does not reach the quality the paper reports, and it placed in the top~100 nationally rather than near the top. The reproduction effort also mis-sequenced its own training schedule relative to the paper --- a mistake we diagnosed only after the submission window closed.
+
+This report is therefore organized around two questions: what was built, and what went wrong. Section~\ref{sec:task} defines the task, data, and metric. Section~\ref{sec:method} describes the method as implemented, including the deviations from the paper. Section~\ref{sec:jittor} is the systems core: the primitives that had to be written from scratch in Jittor and the memory discipline that Jittor's eager-with-graph-execution model forced on us. Section~\ref{sec:results} reports measured results. Section~\ref{sec:postmortem} is the post-mortem. Section~\ref{sec:warmup} covers the qualification round. Sections~\ref{sec:lessons}--\ref{sec:repro} close with lessons and reproducibility.
+
+%=============================================================================
+\section{Task, Data, and Metric}
+\label{sec:task}
+%=============================================================================
+
+\textbf{Task.} The input is a noisy point cloud $\{p_i + n_i\}_{i=1}^{N}$ where the clean points lie on a shape surface normalized into the unit ball and the noise is Laplace-distributed with $\sigma \in [0.005, 0.020]$. The output is a point cloud with \emph{exactly} the same number of points, $\text{float32}$, shape $(N, 3)$; points are expected to move back toward the surface, and the point count is checked by the organizers.
+
+\textbf{Data.} Training uses approximately 20{,}000 ShapeNet meshes (\texttt{.obj}); the test set is a collection of pre-noised clouds (\texttt{.npy}). Because the test set ships without clean references, we built a self-evaluation harness (\texttt{self\_eval.py}) that reserves a fraction of the training meshes (default 10\%), samples points from each mesh, adds Laplace noise at the midpoint of the competition range, runs the full inference pipeline, and computes the competition metrics against the mesh. All numbers in Section~\ref{sec:results} come from this harness.
+
+\textbf{Metric.} Both metrics are means of \emph{squared} nearest-neighbour distances. Chamfer distance is symmetric,
+\begin{equation}
+\mathrm{CD}(A, B) = \tfrac{1}{|A|}\sum_{a \in A} \min_{b \in B}\|a-b\|_2^2 \;+\; \tfrac{1}{|B|}\sum_{b \in B} \min_{a \in A}\|b-a\|_2^2 ,
+\end{equation}
+computed against the clean point set; P2S is one-directional and measured to the mesh surface (via a BVH, with a vertex-only fallback),
+\begin{equation}
+\mathrm{P2S}(A, M) = \tfrac{1}{|A|}\sum_{a \in A} \min_{s \in M}\|a-s\|_2^2 .
+\end{equation}
+Both clouds are normalized to the unit sphere before measuring. The competition score maps each metric to a per-sample score and averages:
+\begin{equation}
+s_i = \mathrm{clamp}\!\left(100\Big(1 - \frac{m_i^{\text{pred}}}{m_i^{\text{noisy}}}\Big),\, 0,\, 100\right),
+\qquad
+\text{Score} = \tfrac{1}{2}\,\overline{s^{\text{CD}}} + \tfrac{1}{2}\,\overline{s^{\text{P2S}}} .
+\end{equation}
+One consequence is worth stating because it shaped how we read our own numbers: the score averages \emph{per-sample ratios}, not the ratio of pooled means. A method can reduce pooled P2S by 67\% and still show a P2S sub-score of 83, because samples where the prediction is much better than the noise average carry the mean upward while a few hard samples are clamped at 0. We report both views in Section~\ref{sec:results}.
+
+%=============================================================================
+\section{Method as Implemented}
+\label{sec:method}
+%=============================================================================
+
+\subsection{StraightPCF in brief}
+
+StraightPCF~\citep{straightpcf} treats denoising as a transport problem: points are moved from the noisy distribution to the clean one along approximately straight paths, which makes single-step (or few-step) integration sufficient at inference. A velocity module $v_\theta$ is trained to predict a displacement that is \emph{constant along the path} --- for a pair $(X_0, X_1)$ of high-noise and clean samples, the regression target is $X_1 - X_0$. Two velocity modules are coupled: VM1 moves the cloud one step, VM2 refines from the moved state, and a distance module $d_\phi$ predicts a scalar in $(0,1)$ that scales the step size so that points stop \emph{on} the surface rather than overshooting it. Inference is Euler integration with $T = \text{steps} \times K$ sub-steps, $K=2$.
+
+\subsection{Data pipeline}
+
+Each training sample is built as follows. From a mesh we sample 32{,}768 surface points (plus 1{,}024 vertex samples used as seeds) and normalize the cloud to the unit ball, recording the center and scale for later denormalization. With probability 0.5 the cloud is rotated by a random Euler angle and rescaled by a factor in $[0.8, 1.2]$. We then cut 8 patches of 1{,}000 points each: a seed point is drawn from the (possibly noisy) cloud, its 1{,}000 nearest neighbours are taken from the \emph{clean} cloud to form $X_1$, a high-noise variant $X_0 = X_1 + \varepsilon_H$ is created with $\varepsilon_H \sim \mathcal{N}(0, \sigma_H^2)$ and $\sigma_H = 0.02$, and a per-point interpolation parameter $t \sim U(0,1)$ gives the encoder input
+\begin{equation}
+X_t = (1-t)\,X_0 + t\,X_1 .
+\end{equation}
+All three clouds are centered on the seed's $X_t$ position, which keeps displacements in a patch-local frame. Per-patch supervision uses 256 points in the competition configuration and all 1{,}000 points in the staged reruns.
+
+\subsection{Architecture}
+
+Table~\ref{tab:arch} lists the network. The encoder is a three-layer dynamic EdgeConv stack: each layer builds a $k$-NN graph ($k=16$) on its own input features and applies an MLP to the concatenation $[x_i,\, x_j - x_i]$ of a point and its edge vector, aggregates messages by scatter-mean, and adds a linear skip on $x_i$. The decoder is a small MLP with batch normalization and dropout. The distance module shares the encoder's features, regresses a per-point scalar, reduces it by max over the patch, and applies a sigmoid (the paper's Eq.~13 ordering). The coupled model is two velocity modules plus the distance module; parameters are counted in the table.
+
+\begin{table}[t]
+  \caption{Architecture as implemented. Parameter counts are computed from the layer dimensions.}
+  \label{tab:arch}
+  \centering
+  \small
+  \begin{tabular}{@{}llr@{}}
+    \toprule
+    Component & Layers & Params \\
+    \midrule
+    Feature extraction & EdgeConv $3{\to}64$, $64{\to}128$, $192{\to}256$ ($k=16$) & 260k \\
+    Decoder & Linear $256{\to}256{\to}64{\to}3$ + BN + dropout(0.1) & 83k \\
+    Distance module & Linear $256{\to}64{\to}64{\to}1$, max over patch, sigmoid & 21k \\
+    \midrule
+    Velocity module (VM) & encoder + decoder & 343k \\
+    Coupled model & VM1 + VM2 + distance module & \textbf{707k} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Training objectives}
+
+The velocity loss is the paper's Eq.~7 with a $1/\sigma_{\text{dsm}}$ scaling ($\sigma_{\text{dsm}} = 0.01$),
+\begin{equation}
+\mathcal{L}_{\text{vel}} = \frac{1}{N}\sum_{i}\frac{1}{\sigma_{\text{dsm}}}\big\|v_\theta(X_t)_i - (X_1 - X_0)_i\big\|_2^2 ,
+\end{equation}
+and the coupling term is the paper's Eq.~10 with $\lambda_1 = 10$,
+\begin{equation}
+\mathcal{L}_{\text{cpl}} = \lambda_1 \big\| X_{t_1}^{\text{pred}} - X_{t_1}^{\text{ideal}} \big\|_2^2 ,
+\qquad
+X_{t_1}^{\text{pred}} = X_t + \tfrac{1}{K} v_{\theta_1}(X_t),\quad
+t_1 = \frac{t(K-1)+1}{K},
+\end{equation}
+where $X_{t_1}^{\text{ideal}}$ is the interpolation point at $t_1$. The distance module is trained with a direct term and a chain term,
+\begin{equation}
+\mathcal{L}_{d} = \big\|d_\phi(X_t) - (1-t)\big\|_2^2 \;+\; \lambda_2 \big\|\bar{X}_1 - X_1\big\|_2^2 ,
+\qquad \lambda_2 = 200,
+\end{equation}
+where $\bar{X}_1$ is the result of a short Euler chain (two steps through VM1/VM2) whose \emph{only} differentiable input is $d_\phi$; this is what teaches $d_\phi$ to scale steps for convergence rather than merely regress $1-t$.
+
+\textbf{The schedule we intended, and the one we ran.} The paper trains in stages: pretrain VM1 alone, pretrain VM2 alone, couple them with $\mathcal{L}_{\text{vel}} + \mathcal{L}_{\text{cpl}}$ (distance module frozen), then train the distance module with the backbone frozen. Configurations for all four stages exist in the repository (\texttt{configs/task/train\_vm\_stage\{1..4\}.yaml}). What actually produced the scored submission was a \emph{merged two-phase} schedule: phase~1 trained both VMs with the coupling term and the distance module frozen; phase~2 first trained the distance module briefly, then unfroze the backbone and continued training everything together --- which is not the paper's schedule, and Section~\ref{sec:postmortem} argues this is our central mistake. After the submission was frozen we reran the paper's schedule properly: Stages~1 and 2 completed (Figure~\ref{fig:curves}a), Stage~3 was launched, and the run was not carried to completion.
+
+\subsection{Inference}
+
+Inference is patch-based (Algorithm~\ref{alg:patch}). Because encoding a full 32k-point cloud at once both mismatches the patch statistics seen in training and exceeds memory at useful batch sizes, we run the network on overlapping patches and blend the results. Seeds come from farthest-point sampling; each patch is the seed's 1{,}000 nearest neighbours, centered on the seed. The Euler integrator runs three steps of the coupled model, giving $T = 3 \times 2 = 6$ sub-steps with step size $d_\phi / T$. Patch outputs are combined by a soft assignment: a point's weight for a patch is $\exp(-\tilde{d})$, where $\tilde{d}$ is the point's KNN-rank distance inside the patch normalized by the patch radius; each point takes the prediction of the patch in which it is most central, and points assigned to no patch keep their noisy positions. We additionally repeat the whole patch-filtering pass 2--4 times based on an estimated noise level (mean 8-NN distance of a subsample) --- a deviation from the paper's single pass, discussed in Section~\ref{sec:postmortem}.
+
+\begin{algorithm}[t]
+  \caption{Patch-based filtering of one noisy cloud}
+  \label{alg:patch}
+  \begin{algorithmic}[1]
+    \State \textbf{Input:} noisy cloud $P \in \mathbb{R}^{N \times 3}$, patch size $M{=}1000$, seeds $K{\approx}6N/M$
+    \State Estimate noise level from mean 8-NN distance; set repeat count $R \in \{2,3,4\}$
+    \For{$r = 1$ to $R$}
+      \State $\{s_k\} \gets \mathrm{FPS}(P, K)$ \Comment{farthest-point seeds}
+      \State $\{P_k\} \gets$ $M$-NN patch of each $s_k$; center each patch on its seed
+      \State $P_k' \gets$ Euler$_{\theta,\phi}(P_k)$ for all $k$ (batched, $\le 8$ patches at a time)
+      \State Re-center patches; blend: $w_k(p) = \exp(-\tilde{d}_k(p))$; $P \gets$ per-point argmax assignment
+      \State Points with no assignment keep their previous positions
+    \EndFor
+    \State \textbf{return} $P$ (denormalized)
+  \end{algorithmic}
+\end{algorithm}
+
+%=============================================================================
+\section{Jittor Engineering}
+\label{sec:jittor}
+%=============================================================================
+
+Jittor executes Python eagerly but builds and fuses the underlying computation graph with its own JIT, and it has no PyTorch-ecosystem counterpart for point-cloud primitives. Almost every geometric primitive this task needs --- $k$-NN, farthest-point sampling, edge convolutions --- had to be written by hand against Jittor ops, under memory behaviour quite different from PyTorch's. This section documents those primitives and the memory discipline they required.
+
+\subsection{Primitives}
+
+\textbf{Chunked $k$-NN.} A direct broadcast $(N, 1) - (1, M)$ over a 1{,}000-point patch is fine, but $k$-NN is also needed against 32{,}768-point clouds, where the full distance matrix ($N \times M$ floats) is not. The implementation streams the reference cloud in chunks of 1{,}024, maintains a running top-$k$ by concatenating each chunk's distances with the running best and re-selecting, and records the original indices through \texttt{gather}. This keeps peak memory linear in the chunk size while remaining exact.
+
+\textbf{Farthest-point sampling.} FPS is inherently sequential; our version does one \texttt{argmax} per selected point and thus one GPU$\to$CPU synchronization per seed. That is acceptable when selecting a handful of patch seeds ($K \approx 6$ per 1{,}000 points) but was moved to a NumPy implementation for whole-cloud downsampling, where the seed count is large and the syncs dominated.
+
+\textbf{Edge convolution.} Jittor has no scatter-mean kernel on GPU for this layout, so EdgeConv is implemented with dense \texttt{scatter\_} (\texttt{reduce='add'}) over the destination index, followed by division by the accumulated count, plus the linear skip branch. This is exact and works on the (points, $k$) edge list produced by the graph builder.
+
+\textbf{NumPy/SciPy at the edges.} Patch construction, patch blending, and the evaluation metrics use \texttt{scipy.spatial.cKDTree} on the CPU --- not for speed but for predictability: KNN targets computed in the graph re-entered the computational graph and inflated memory, so a later variant (the score-based detour, Section~\ref{sec:postmortem}) computes its targets entirely on the CPU.
+
+\subsection{Memory and the computation graph}
+
+Jittor accumulates the computation graph until it is executed and collected, and our first implementation fought both out-of-memory failures and intermittent segfaults caused by graph and buffer accumulation. The fix that made long runs possible was an explicit hygiene discipline: \texttt{jt.sync\_all()} (execute and release) followed by \texttt{jt.gc()} after every encoder block, after every training step, and at epoch boundaries; a cap of 8 patches per inference batch; and detaching patch outputs from the graph before blending. The same discipline reduced the peak memory of an encoder forward pass enough to train at batch size 24 with 8 patches per sample. None of this is elegant, and it is not free --- the syncs cost throughput --- but it converted a training run that reliably crashed into one that completed 100 epochs unattended.
+
+\subsection{Vectorizing the reconstruction}
+
+The patch-blending reconstruction was initially written as per-patch Python loops, and because every comparison against the assignment mask crossed the GPU$\to$CPU boundary via \texttt{.item()}, a single cloud's reconstruction cost roughly $3\times10^5$ synchronizations. Rewriting the assignment with vectorized \texttt{jt.equal} + \texttt{jt.nonzero} masked scatter brought that to roughly $3\times10^2$, which was the difference between an inference pass that could be run interactively and one that could not. The same pattern --- find the Python loop that syncs per iteration, replace it with a masked tensor operation --- recurred in FPS and in KNN.
+
+\subsection{Distributed training}
+
+Data-parallel training uses Jittor's built-in MPI integration (\texttt{mpirun -np 6 python run.py \dots}): parameters are broadcast at start via \texttt{mpi\_param\_broadcast}, validation losses are all-reduced, and checkpointing/logging are rank-0 only. Two practical notes: dataloaders are constructed before the CUDA context is initialized to avoid the fork-after-CUDA hazard, and the launch configuration carries \texttt{NCCL\_P2P\_DISABLE=1} as a workaround for peer-to-peer collective hangs on the shared node. With six workers, the coupled configuration trains at roughly 340--430\,s per epoch; the staged configurations, which supervise $4\times$ more points per patch, run at 820--1{,}070\,s per epoch.
+
+\subsection{Evaluation and profiling tooling}
+
+Three scripts shaped the work more than any model change. \texttt{self\_eval.py} builds a held-out split and computes the full competition metric, including the mesh-based P2S, so that checkpoint selection could target the metric rather than the loss. \texttt{profile.py} attributes wall-clock time between data loading and GPU compute and auto-probes the batch size that fits. \texttt{vis\_denoising.py} renders per-sample diagnostics --- displacement direction error, magnitude, and error histograms --- which is how we first saw that the network's displacements were directionally decent but mis-scaled, the symptom that later pointed at the distance module.
+
+%=============================================================================
+\section{Results}
+\label{sec:results}
+%=============================================================================
+
+\subsection{Denoising quality}
+
+Table~\ref{tab:glance} gives the headline numbers for the best scored submission. The best score was 67.44/100, with the Chamfer half (51.9) noticeably weaker than the P2S half (82.9). Two readings of the same numbers are useful. Pooled over samples, CD falls from $2.46\times10^{-4}$ to $1.21\times10^{-4}$ (a 51\% reduction) and P2S from $1.96\times10^{-4}$ to $6.4\times10^{-5}$ (a 67\% reduction). The per-sample sub-scores are higher for P2S (82.9 versus a pooled 67\% reduction) because the per-sample score average rewards samples where the prediction is much better than noise while clamping the few bad samples at zero.
+
+\begin{table}[t]
+  \caption{Results at a glance. All figures are on the held-out self-evaluation split (10\% of the training meshes, Laplace noise); the sub-scores and the final score follow the competition's per-sample formula (Eq.~3). The last row is a later rerun of the same architecture under the merged schedule as re-tuned in July.}
+  \label{tab:glance}
+  \centering
+  \small
+  \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    Quantity & Noisy input & Best submission & July rerun \\
+    \midrule
+    CD, pooled mean ($\times 10^{-4}$) & 2.46 & \textbf{1.21} & 1.20 \\
+    P2S, pooled mean ($\times 10^{-4}$) & 1.96 & \textbf{0.64} & 0.72 \\
+    CD sub-score & --- & 51.94 & 51.65 \\
+    P2S sub-score & --- & \textbf{82.94} & 77.93 \\
+    Final score & --- & \textbf{67.44} & 64.79 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/training_curves.pdf}
+  \caption{(a) Stage~1/2 pretraining (Eq.~7 velocity loss, one value per epoch) from the staged rerun of July 2026. The two independent runs are nearly indistinguishable, and the loss falls three orders of magnitude before the cosine warm restart at epoch~11; both settle at ${\approx}0.101$. (b) The full coupled training run of May 2026 that produced the best submission (train and validation loss, one epoch per point). Both curves plateau by epoch ${\sim}40$; the remaining 60 epochs did not improve the metric.}
+  \label{fig:curves}
+\end{figure}
+
+\subsection{Training dynamics}
+
+Two observations from Figure~\ref{fig:curves} framed our later reading of the whole effort. First, the staged pretraining runs are highly reproducible: VM1 and VM2, trained independently with the same recipe from different seeds, follow nearly identical trajectories (3.78 $\to$ 0.101 over 15 epochs), so the training machinery itself is stable. Second, and less comfortably, both the pretraining and the coupled run reach their loss floors quickly --- within 5 and about 40 epochs respectively --- after which hundreds of additional epochs changed neither the loss nor the metric. We treated the plateau as an optimization problem for too long; the evidence points instead at the training target and its mismatch with the evaluation distribution (Section~\ref{sec:postmortem}).
+
+\subsection{What changed the numbers}
+
+For completeness, the changes we can attribute improvements to, ordered by confidence: (i)~cutting 8 patches of 1{,}000 points per sample instead of one (an $8\times$ increase in supervised points per sample); (ii)~moving inference from whole-cloud Euler integration to patch-based filtering, which fixed both a train/inference statistics mismatch and the memory ceiling; (iii)~feeding the encoder the same interpolation state that training uses when computing the coupled state ($X_{t_1}$), removing a small distribution shift; (iv)~removing the distance module from the phase-1 forward pass (encoder calls per step 3$\to$2); and (v)~the reconstruction vectorization and sync discipline of Sections~\ref{sec:jittor}. Items (i)--(iii) were validated by the competition metric; (iv)--(v) are throughput and stability wins.
+
+%=============================================================================
+\section{Post-Mortem: What Failed and Why}
+\label{sec:postmortem}
+%=============================================================================
+
+This section is the part of the report we wish we had written before submitting.
+
+\paragraph{The merged schedule and the distance module.} The paper's staged schedule is not incidental: the distance module is trained last \emph{with the backbone frozen}, so that it learns to scale step sizes against a stationary feature distribution. Our competition schedule instead trained the distance module briefly and then unfroze the backbone, after which the features it had learned against changed. The July rerun quantifies the damage: with the backbone unfrozen and the distance module along for the ride, the P2S sub-score fell from 82.9 to 77.9 while CD was unchanged --- exactly the signature of a step-size regulator that no longer stops points on the surface, with the direction of motion (which CD is more sensitive to) unaffected. This is our best explanation for the gap to the paper, and we identified it after the submission window had closed.
+
+\paragraph{Noise-model drift.} The method's mathematics assumes interpolation between a noisy and a clean sample of the \emph{same} noise family: the velocity target $X_1 - X_0$ is meaningful because $X_t$ moves along that line. The competition's noise is Laplace. We trained with a ``mixed'' schedule (60\% Laplace, 20\% Gaussian, 20\% uniform) intended to hedge, which quietly violates the interpolation assumption for two-fifths of the samples. The hedge bought nothing measurable and cost fidelity to the method's premise; the staged reruns use pure Gaussian per the paper, and the honest conclusion is that we should have matched the evaluation noise distribution exactly rather than hedging inside a framework whose math assumes a specific family.
+
+\paragraph{Inference repetition masquerading as improvement.} Our inference repeats the patch filter 2--4 times depending on estimated noise. This raises the score --- iterated Euclidean projections onto an imperfectly straight field behave like a curved path --- but it means the reported quality partly reflects inference compute rather than the velocity field. The paper's single pass is the honest configuration, and we could not reproduce the paper's numbers under it.
+
+\paragraph{A plateau we did not diagnose in time.} Loss floors at epoch 5 (pretraining) and ${\sim}40$ (coupled) with no metric movement afterward should have redirected us from learning-rate tuning to the objective itself: the loss is a proxy (velocity or interpolation error), and we had no mechanism guaranteeing that driving it to its floor optimizes CD/P2S. The metric harness that could have told us this earlier was itself built mid-competition --- a sequencing mistake.
+
+\paragraph{The score-based detour.} In the final weeks we implemented a ScoreDenoise-style~\citep{scoredenoise} variant reusing the same encoder/decoder: the target becomes the empirical score $\mathrm{NN}(X_t, X_{\text{clean}}) - X_t$ and inference becomes annealed Langevin dynamics. It was attractive because it is distribution-agnostic --- it does not assume a noise family or straight paths --- which is exactly the property our Laplace/Gaussian mismatch needed. The implementation ran into a wall of memory problems (the $O(N^2)$ nearest-neighbour target on 1{,}000-point patches), solved first by chunking and finally by computing targets on the CPU with \texttt{cKDTree}; the code exists in the repository (\texttt{src/model/score\_vm.py}) and was never trained to a comparable state before the deadline. It consumed the last stretch of the competition and produced no scored result.
+
+\paragraph{Process.} Three process failures, in decreasing order of cost: the staged reproduction (the correct move) started after the submission was frozen, not before it; the official-metric harness arrived late, so weeks were spent optimizing a proxy loss; and with a single part-time participant, the last-mile work --- running the proper schedule to completion --- simply did not fit the window.
+
+%=============================================================================
+\section{The Qualification Round: PCT for ModelNet40}
+\label{sec:warmup}
+%=============================================================================
+
+The track opened with a qualification round: classify ModelNet40 shapes from 2{,}048 points into 40 categories, with the framework restricted to Jittor and a test-accuracy threshold of 80\% to advance.
+
+The final model is a Point Cloud Transformer in the shape of the PCT paper's full architecture~\citep{pct} (${\sim}2.9$M parameters): a convolutional stem, two sample-and-group stages (farthest-point sampling, $k$-NN with $k=32$, local feature aggregation), four offset-attention layers with positional encoding and skip connections, and a max-pooled classifier head. Training used AdamW with warmup-cosine learning rate, label smoothing (0.1), dropout, EMA of the weights, and the standard point-cloud augmentations (random scaling, translation, point dropout, and Gaussian jitter); validation was a fixed 90/10 split.
+
+The engineering arc is worth one paragraph because it mirrors what later mattered on the main track. A minimal PCT cleared the threshold; the meaningful gains came from the hierarchical sample-and-group stages and the augmentation set rather than from attention variants --- an experiment that added geometric (pairwise-distance) attention biases underperformed and was dropped. The lesson that transferred was the value of the augmentation pipeline and of having a validation split at all; the lesson that did not transfer was that architectural tinkering beat data-side work.
+
+%=============================================================================
+\section{Lessons Learned}
+\label{sec:lessons}
+%=============================================================================
+
+\begin{itemize}
+  \item \emph{Reproduce the schedule, not just the architecture.} The single largest gap to the paper came from a training-order deviation we chose for expedience. In methods whose components are trained against each other's frozen states, the schedule is part of the method.
+  \item \emph{The training objective is not the metric.} Both our losses had clean floors; the metric did not follow. A held-out harness for the real metric belongs in the first week, not the last.
+  \item \emph{Do not hedge inside a method's assumptions.} Mixed-noise training was our hedge against an unknown test distribution; it cost fidelity to the interpolation premise and bought nothing.
+  \item \emph{Inference tricks that compensate hide what is broken.} Repeating the filter raised the score and concealed a velocity field that was not straight enough. The deviation was also the tell.
+  \item \emph{In Jittor, memory hygiene is part of the model.} \texttt{sync\_all}/\texttt{gc} placement, chunked KNN, and patch-batch caps are what made long runs possible; they are engineering decisions with accuracy consequences, not a tuning detail.
+  \item \emph{Python-level loops are the performance bug until proven otherwise.} Per-iteration \texttt{.item()} calls dominated reconstruction until vectorized; the pattern repeated in FPS and KNN.
+  \item \emph{MPI data parallelism was the easy part.} Jittor's broadcast/all-reduce integration worked in an afternoon; the friction was in primitives, memory, and the metric, which is where the time should have been budgeted.
+\end{itemize}
+
+%=============================================================================
+\section{Reproducibility}
+\label{sec:repro}
+%=============================================================================
+
+The repository contains everything needed to rebuild and rerun the pipeline. Training and inference run through \texttt{denoise/run.py} with per-task YAML configs under \texttt{denoise/configs/}: \texttt{train\_vm.yaml} (the merged schedule that produced the submission), \texttt{train\_vm\_stage\{1..4\}.yaml} (the paper's schedule), \texttt{predict\_vm.yaml}, and \texttt{train\_score.yaml} (the untrained score-based variant). Evaluation is \texttt{self\_eval.py} (held-out split, full metric) and \texttt{evaluate.py} (official-style scoring); diagnostics are \texttt{profile.py} and \texttt{vis\_denoising.py}. Figures and tables in this report are generated by \texttt{report/make\_figures.py} from the run logs (the May run log is included under \texttt{report/data/}). The dataset --- ShapeNet meshes and the pre-noised test clouds --- is provided by the competition organizers and is not redistributed here; datalist files define the splits.
+
+\vspace{0.8em}
+\noindent\rule{\linewidth}{0.4pt}
+\vspace{-0.4em}
+\begin{quote}
+\small \emph{Acknowledgement of scope.} The task definition, dataset, and evaluation protocol belong to the organizers of the 6th Jittor AI Challenge (Track~2). The StraightPCF method and its equations are due to \citet{straightpcf}. The implementation in Jittor, the experiments, the evaluation harness, and all measurements and errors in this report are my own.
+\end{quote}
+
+\begin{thebibliography}{9}
+
+\bibitem[de Silva Edirimuni et al.(2024)]{straightpcf}
+Dasith de Silva Edirimuni, Xuequan Lu, Gang Li, Lei Wei, Antonio Robles-Kelly, and Hongdong Li.
+\newblock StraightPCF: Straight point cloud filtering.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2024.
+
+\bibitem[Luo and Hu(2021)]{scoredenoise}
+Shitong Luo and Wei Hu.
+\newblock Score-based point cloud denoising.
+\newblock In \emph{Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)}, 2021.
+
+\bibitem[Guo et al.(2021)]{pct}
+Meng-Hao Guo, Jun-Xiong Cai, Zheng-Ning Liu, Tai-Jiang Mu, Ralph R. Martin, and Shi-Min Hu.
+\newblock PCT: Point cloud transformer.
+\newblock \emph{Computational Visual Media}, 7(2):187--199, 2021.
+
+\bibitem[Qi et al.(2017)]{pointnet}
+Charles R. Qi, Hao Su, Kaichun Mo, and Leonidas J. Guibas.
+\newblock PointNet: Deep learning on point sets for 3D classification and segmentation.
+\newblock In \emph{CVPR}, 2017.
+
+\end{thebibliography}
+
+\end{document}

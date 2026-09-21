@@ -2,6 +2,8 @@
 
 计图挑战赛赛道二正式赛题 — 基于 Jittor 框架实现 StraightPCF 点云降噪模型，从含噪点云中恢复干净表面。
 
+> 技术报告（英文，含方法、工程细节与失败复盘）：[`../report/tech_report.pdf`](../report/tech_report.pdf)
+
 ## 赛题简介
 
 给定从三维物体表面采样并受噪声污染的点云，模型需要预测每个点的位移向量，将含噪点"推回"到真实物体表面附近，输出降噪后的点云。
@@ -42,7 +44,7 @@ Denoised Output
 - **FeatureExtraction**: 3 层 DynamicEdgeConv (k=16, feat_dim=256)
 - **Decoder**: 3 层 MLP (256 → 64 → 3), 输出三维位移向量
 - **DistanceModule**: 小型 MLP (256 → 64 → 1), 输出距离标量 d_φ ∈ [0,1] 缩放步长
-- 总参数量：~530K
+- 总参数量：约 0.7M（两个速度模块各约 0.34M + 距离模块约 0.02M）
 
 ### 论文参考
 
@@ -290,10 +292,10 @@ denoise/
   requirements.txt        # Python 依赖
 
   configs/
-    task/                 # 任务配置 (train/predict/quick_train/debug)
+    task/                 # 任务配置 (train/predict/quick_train/debug/stage1-4/score)
     data/                 # 数据配置 (train/quick_train/predict)
-    model/                # 模型配置 (vm)
-    transform/            # 变换配置 (vm/predict)
+    model/                # 模型配置 (vm/score)
+    transform/            # 变换配置 (vm/predict/score)
     system/               # 系统配置 (vm/dummy)
 
   src/
@@ -312,6 +314,7 @@ denoise/
       vm.py               # VelocityModule + FPS/KNN/patch 去噪
       coupled_vm.py       # CoupledVelocityModule (VM1+VM2+DistanceModule)
       distance_module.py  # DistanceModule (距离标量 d_φ)
+      score_vm.py         # ScoreVelocityModule (ScoreDenoise 变体，未训练到可用)
     system/
       spec.py             # 训练循环 / 验证 / 推理 / 早停
       parse.py            # 系统工厂函数
