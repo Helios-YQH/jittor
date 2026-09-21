@@ -31,6 +31,15 @@ papers/
 
 # IDE
 .claude/
+.idea/
+
+# LaTeX build artifacts
+report/*.aux
+report/*.fls
+report/*.fdb_latexmk
+report/*.out
+report/*.log
+report/*.synctex.gz
 
 *.obj
 *.npy
