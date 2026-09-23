@@ -8,10 +8,10 @@
 
 | 赛题 | 模型 | 结果 |
 |---|---|---|
-| 点云去噪 | StraightPCF 复现：耦合速度模块，约 0.7M 参数 | 竞赛最好成绩 **67.44/100**（CD 子分 51.9，P2S 子分 82.9）；相对含噪输入 CD 下降 51%、P2S 下降 67%；全国前 100 |
-| 三维形状分类 | PCT：2 个下采样分组模块 + 4 层 Offset-Attention，约 2.9M 参数 | 热身赛第 12 名，进入正式赛要求测试集准确率 ≥ 80% |
+| 点云去噪 | StraightPCF 复现：耦合速度模块，约 0.7M 参数 | 留出集自评 **67.44/100**（竞赛口径，CD 子分 51.9，P2S 子分 82.9）；全国前 100 |
+| 三维形状分类 | PCT：2 个采样分组模块 + 4 层 Offset-Attention，约 2.9M 参数 | 热身赛第 12 名，该轮通过线为测试集准确率 ≥ 80% |
 
-去噪分数在训练网格的留出集上按竞赛指标（Chamfer 距离与点到面距离，逐样本计分）测得，未达到 StraightPCF 论文报告的精度；报告把主要差距归因于训练阶段安排偏离了论文。
+留出集整体统计：去噪后相对含噪输入的 Chamfer 距离下降 51%、点到面误差下降 67%。论文报告的精度来自它自己的高斯噪声数据集，与本次比赛使用的 Laplace 噪声不可直接比较；报告认为差距主要来自训练流程与论文不一致。
 
 ## 仓库结构
 
@@ -26,7 +26,7 @@
 │   └── src/
 │       ├── data/            #   网格采样、归一化、噪声、patch 构造
 │       ├── model/           #   EdgeConv 编码器、速度模块、距离模块
-│       └── system/          #   训练器与结果写出
+│       └── system/          #   训练器与结果保存
 ├── warmup/                  # ModelNet40 分类（PCT）
 │   ├── train.py             #   训练与推理
 │   ├── rf_pct.py            #   PCT 基础模块：Offset-Attention、采样分组
@@ -68,7 +68,7 @@ python run.py --task configs/task/predict_vm.yaml
 python self_eval.py --task configs/task/train_vm.yaml --split_ratio 0.1 --num_samples 10000
 ```
 
-论文的分阶段训练有独立配置：`configs/task/train_vm_stage{1..4}.yaml`。ScoreDenoise 风格的变体在 `src/model/score_vm.py`，配置为 `train_score.yaml` 和 `predict_score.yaml`，未训练到可用状态。
+论文的分阶段训练有独立配置：`configs/task/train_vm_stage{1..4}.yaml`。ScoreDenoise 风格的变体在 `src/model/score_vm.py`，配置为 `train_score.yaml` 和 `predict_score.yaml`，未训练到可比状态。
 
 分类，在 `warmup/` 下执行：
 
@@ -96,7 +96,7 @@ python train.py --data_dir ./data --epochs 300 --batch_size 32
 
 ## 许可
 
-MIT，见 [LICENSE](LICENSE)。
+采用 MIT 许可证，见 [LICENSE](LICENSE)。
 
 ## 参考文献
 

@@ -8,10 +8,10 @@ A solo entry to the 6th Jittor AI Challenge, implemented in [Jittor](https://git
 
 | Task | Model | Result |
 |---|---|---|
-| Point-cloud denoising | StraightPCF reproduction: coupled velocity module, ≈0.7M parameters | Best competition score **67.44/100** (CD sub-score 51.9, P2S sub-score 82.9); CD down 51%, P2S down 67% against the noisy input; national top 100 |
-| Shape classification | PCT: 2 sample-and-group stages and 4 offset-attention blocks, ≈2.9M parameters | Ranked 12th in the warmup round, which required ≥80% test accuracy to qualify |
+| Point-cloud denoising | StraightPCF reproduction: coupled velocity module, ≈0.7M parameters | **67.44/100** by the competition formula on our held-out split (CD sub-score 51.9, P2S sub-score 82.9); national top 100 |
+| Shape classification | PCT: 2 sample-and-group stages and 4 offset-attention blocks, ≈2.9M parameters | 12th in the warmup round; the round's pass mark was 80% test accuracy |
 
-The denoising numbers come from a held-out split of the training meshes, scored with the competition metric (Chamfer distance and point-to-surface distance, per-sample). They fall short of the accuracy reported in the StraightPCF paper; the report attributes most of the gap to a training-schedule deviation from the paper.
+Pooled over the held-out samples, denoising cuts the Chamfer distance by 51% and the point-to-surface error by 67% against the noisy input. The paper reports higher accuracy on its own Gaussian-noise benchmarks, which are not comparable to this competition's Laplace noise; the report's post-mortem attributes the gap chiefly to a training-schedule deviation from the paper.
 
 ## Repository layout
 
@@ -68,7 +68,7 @@ python run.py --task configs/task/predict_vm.yaml
 python self_eval.py --task configs/task/train_vm.yaml --split_ratio 0.1 --num_samples 10000
 ```
 
-The paper's staged schedule has its own configs: `configs/task/train_vm_stage{1..4}.yaml`. A score-based variant in the style of ScoreDenoise lives in `src/model/score_vm.py` with configs `train_score.yaml` and `predict_score.yaml`; it was never trained to a competitive state.
+The paper's staged schedule has its own configs: `configs/task/train_vm_stage{1..4}.yaml`. A score-based variant in the style of ScoreDenoise is implemented in `src/model/score_vm.py`, with `train_score.yaml` and `predict_score.yaml`; it was never trained to a comparable state.
 
 Classification, run from `warmup/`:
 
@@ -79,7 +79,7 @@ python train.py --data_dir ./data --epochs 300 --batch_size 32
 
 ## Data
 
-The datasets — ShapeNet meshes for training and pre-noised test clouds — are provided by the competition organizers and are not included in this repository. The code expects them under `denoise/dataset_train/` and `denoise/dataset_test_noisy/`, with split lists in `denoise/datalist/`; `denoise/README.md` documents the layout.
+Training meshes and pre-noised test clouds are provided by the competition organizers and are not included here. The code expects them under `denoise/dataset_train/` and `denoise/dataset_test_noisy/`, with split lists in `denoise/datalist/`; `denoise/README.md` documents the layout.
 
 ## Documentation
 
@@ -92,7 +92,7 @@ The datasets — ShapeNet meshes for training and pre-noised test clouds — are
 
 ## Status
 
-The competition ended in 2026. The code is archived as it was; `report/tech_report.pdf` covers the results and the failures.
+The competition ended in 2026; the code is archived as it was.
 
 ## License
 
