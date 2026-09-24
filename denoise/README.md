@@ -3,6 +3,8 @@
 计图挑战赛赛道二正式赛题 — 基于 Jittor 框架实现 StraightPCF 点云降噪模型，从含噪点云中恢复干净表面。
 
 > 技术报告（英文，含方法、工程细节与失败复盘）：[`../report/tech_report.pdf`](../report/tech_report.pdf)
+>
+> **注意**：仓库里的代码是 7 月重构后的版本，与产生 67.44 分的那份提交**不是同一套管线**——提交版直接在真实含噪点云上训练、不使用 DistanceModule 与 coupling 项；7 月改为论文式的合成噪声训练后掉到 64.79。两者差异见技术报告第 3 节。
 
 ## 赛题简介
 
@@ -42,9 +44,10 @@ Denoised Output
 ```
 
 - **FeatureExtraction**: 3 层 DynamicEdgeConv (k=16, feat_dim=256)
-- **Decoder**: 3 层 MLP (256 → 64 → 3), 输出三维位移向量
-- **DistanceModule**: 小型 MLP (256 → 64 → 1), 输出距离标量 d_φ ∈ [0,1] 缩放步长
-- 总参数量：约 0.7M（两个速度模块各约 0.34M + 距离模块约 0.02M）
+- **FeatureExtraction**: 3 层 DynamicEdgeConv (k=16)。提交版通道为 3→32→64→96→256，当前代码为 3→64→128→192→256
+- **Decoder**: MLP (256 → 256 → 64 → 3)，输出三维位移向量
+- **DistanceModule**: 小型 MLP (256 → 64 → 64 → 1)，按 patch 取 max 后过 sigmoid，输出距离标量 d_φ ∈ [0,1] 缩放步长。**提交版本没有使用它**（训练目标里没有该项，推理的 Euler 步进也已摘除）
+- 参数量：提交版两个速度模块合计约 0.47M；当前代码（更宽的编码器 + 距离模块）约 0.71M
 
 ### 论文参考
 
@@ -143,9 +146,9 @@ load_ckpt: experiments/vm/checkpoint_20260518_143022/checkpoint_latest.pkl
 | 配置项 | 值 | 文件 |
 |--------|-----|------|
 | 模型 | CoupledVelocityModule | `configs/model/vm.yaml` |
-| 全局 Batch Size | 72 | `configs/data/train.yaml` |
+| Batch Size | 24 | `configs/data/train.yaml` |
 | 优化器 | Adam (lr=1e-4) | `configs/task/train_vm.yaml` |
-| 学习率调度 | StepLR (step=30, gamma=0.1) | `configs/task/train_vm.yaml` |
+| 学习率调度 | cosine warm restart | `configs/task/train_vm.yaml` |
 | Epochs | 100 | `configs/task/train_vm.yaml` |
 | 采样点数 | 32768 | `configs/transform/vm.yaml` |
 | Patch 大小/数量 | 1000 / 8 | `configs/transform/vm.yaml` |
@@ -233,11 +236,11 @@ python self_eval.py --task configs/task/train_vm.yaml --split_ratio 0.1 --num_sa
 
 ### Chamfer Distance (CD)
 
-$$CD(S_{pred},S_{gt})=\frac{1}{|S_{pred}|}\sum_{x \in S_{pred}} \min_{y \in S_{gt}} \|x-y\|_2 + \frac{1}{|S_{gt}|}\sum_{y \in S_{gt}} \min_{x \in S_{pred}} \|y-x\|_2$$
+$$CD(S_{pred},S_{gt})=\frac{1}{|S_{pred}|}\sum_{x \in S_{pred}} \min_{y \in S_{gt}} \|x-y\|_2^2 + \frac{1}{|S_{gt}|}\sum_{y \in S_{gt}} \min_{x \in S_{pred}} \|y-x\|_2^2$$
 
 ### Point-to-Surface Distance (P2S)
 
-$$P2S(S_{pred},M)=\frac{1}{|S_{pred}|}\sum_{x \in S_{pred}} \min_{y \in M} \|x-y\|_2$$
+$$P2S(S_{pred},M)=\frac{1}{|S_{pred}|}\sum_{x \in S_{pred}} \min_{y \in M} \|x-y\|_2^2$$
 
 ### 百分制评分
 
@@ -333,7 +336,7 @@ Caught segfault at address 0x7f..., thread_name: '', flush log...
 
 ### CD 分数低 / P2S 分数高
 
-这是 DSM 训练的典型过渡阶段。模型先学习法向分量（提升 P2S），再学习切向分量（提升 CD）。需要更多 epoch（建议 300+）或调整训练策略。
+我们当时也停在这个状态，最终没有解决。事后复盘的结论是：把训练数据换成论文式的"干净点云 + 合成高斯噪声"之后，模型与比赛使用的 Laplace 噪声脱节——单独用高斯噪声训练的模块在比赛分布上得分 1.01/100。训练更久没有帮助：两个阶段的 loss 都在 5–40 个 epoch 内到平台。详见技术报告第 6 节。
 
 ### GPU 显存不足 (OOM)
 
@@ -348,3 +351,8 @@ Caught segfault at address 0x7f..., thread_name: '', flush log...
 - 所有团队需开源代码方视为有效成绩
 - 每队伍每天最多提交 2 次
 - 降噪点云点数必须与输入含噪点云严格一致
+
+## 来源与许可
+
+- 方法、损失函数与网络结构来自 StraightPCF（de Silva Edirimuni 等，*Straight Point Cloud Filtering*, CVPR 2024），编码器/解码器的结构参照其官方实现编写。
+- 本仓库代码采用 MIT 许可，见 [`../LICENSE`](../LICENSE)。

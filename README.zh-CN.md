@@ -8,10 +8,14 @@
 
 | 赛题 | 模型 | 结果 |
 |---|---|---|
-| 点云去噪 | StraightPCF 复现：耦合速度模块，约 0.7M 参数 | 留出集自评 **67.44/100**（竞赛口径，CD 子分 51.9，P2S 子分 82.9）；全国前 100 |
+| 点云去噪 | StraightPCF 复现：两个速度模块，约 0.47M 参数 | 9 个网格留出集上自评 **67.44/100**（竞赛口径，CD 子分 51.9，P2S 子分 82.9）；全国前 100 |
 | 三维形状分类 | PCT：2 个采样分组模块 + 4 层 Offset-Attention，约 2.9M 参数 | 热身赛第 12 名，该轮通过线为测试集准确率 ≥ 80% |
 
-留出集整体统计：去噪后相对含噪输入的 Chamfer 距离下降 51%、点到面误差下降 67%。论文报告的精度来自它自己的高斯噪声数据集，与本次比赛使用的 Laplace 噪声不可直接比较；报告认为差距主要来自训练流程与论文不一致。
+留出集整体统计：去噪后相对含噪输入的 Chamfer 距离下降 51%、点到面误差下降 67%。论文报告的精度来自它自己的高斯噪声数据集，与本次比赛使用的 Laplace 噪声不可直接比较；报告认为七月重构中掉的分主要来自噪声模型的改变。
+
+**提交版本与仓库里的代码不是同一套管线**：提交版直接在真实含噪点云上训练，没有 coupling 项也没有 DistanceModule；七月改成论文式的合成高斯噪声后掉了 2.65 分。详见报告第 3 节与第 6 节。
+
+![降噪一个测试样本：含噪输入、同一薄层切片在降噪前后的对比，以及每个点位移的分布。](report/figures/denoising_example.png)
 
 ## 仓库结构
 
@@ -88,7 +92,6 @@ python train.py --data_dir ./data --epochs 300 --batch_size 32
 | [`report/tech_report.pdf`](report/tech_report.pdf) | 英文 | 方法、Jittor 工程实现、结果、失败复盘 |
 | [`denoise/README.md`](denoise/README.md) | 中文 | 去噪：用法、配置、打包提交、常见问题 |
 | [`warmup/README.md`](warmup/README.md) | 中文 | 分类：模型架构、训练策略、改进历程 |
-| [`denoise/ANALYSIS.md`](denoise/ANALYSIS.md) | 中文 | 分数退化分析与分阶段复现计划的工作笔记 |
 
 ## 状态
 
@@ -100,6 +103,7 @@ python train.py --data_dir ./data --epochs 300 --batch_size 32
 
 ## 参考文献
 
-- StraightPCF: *Straight Point Cloud Filtering*, CVPR 2024。
+- StraightPCF: *Straight Point Cloud Filtering*, CVPR 2024 —— 复现的方法，编码器/解码器结构参照其官方实现。
 - ScoreDenoise: *Score-Based Point Cloud Denoising*, ICCV 2021 —— `src/model/score_vm.py` 中的 score 变体。
 - PCT: *Point Cloud Transformer*, Computational Visual Media 2021 —— 热身赛分类器。
+- PointNet++（Qi 等，NeurIPS 2017）—— `warmup/rf_ops.py` 中的 `index_points`、`square_distance`、ball query 与 KNN 内核移植并改编自它，原实现为 MIT 许可。

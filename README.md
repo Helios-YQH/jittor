@@ -8,10 +8,14 @@ A solo entry to the 6th Jittor AI Challenge, implemented in [Jittor](https://git
 
 | Task | Model | Result |
 |---|---|---|
-| Point-cloud denoising | StraightPCF reproduction: coupled velocity module, ≈0.7M parameters | **67.44/100** by the competition formula on our held-out split (CD sub-score 51.9, P2S sub-score 82.9); national top 100 |
+| Point-cloud denoising | StraightPCF reproduction: two velocity modules, ≈0.47M parameters | **67.44/100** by the competition formula on a nine-mesh held-out split (CD sub-score 51.9, P2S sub-score 82.9); national top 100 |
 | Shape classification | PCT: 2 sample-and-group stages and 4 offset-attention blocks, ≈2.9M parameters | 12th in the warmup round; the round's pass mark was 80% test accuracy |
 
-Pooled over the held-out samples, denoising cuts the Chamfer distance by 51% and the point-to-surface error by 67% against the noisy input. The paper reports higher accuracy on its own Gaussian-noise benchmarks, which are not comparable to this competition's Laplace noise; the report's post-mortem attributes the gap chiefly to a training-schedule deviation from the paper.
+Pooled over the held-out samples, denoising cuts the Chamfer distance by 51% and the point-to-surface error by 67% against the noisy input. The paper reports higher accuracy on its own Gaussian-noise benchmarks, which are not comparable to this competition's Laplace noise; the report's post-mortem traces the points lost in the July rewrite chiefly to the switch in noise model.
+
+The submitted pipeline and the code in this repository are not the same. The submission trained on the competition's own noisy clouds, with neither the coupling term nor the distance module; the July rewrite that added them, and switched to the paper's synthetic Gaussian noise, scored 2.65 points lower. Sections 3 and 6 of the report cover both.
+
+![Denoising one test-set cloud: the noisy input, a thin cross-section before and after filtering, and the distribution of per-point displacements.](report/figures/denoising_example.png)
 
 ## Repository layout
 
@@ -88,7 +92,6 @@ Training meshes and pre-noised test clouds are provided by the competition organ
 | [`report/tech_report.pdf`](report/tech_report.pdf) | English | Method, Jittor engineering, results, post-mortem |
 | [`denoise/README.md`](denoise/README.md) | Chinese | Denoising: usage, configs, packaging, FAQ |
 | [`warmup/README.md`](warmup/README.md) | Chinese | Classification: architecture, training strategy, iteration history |
-| [`denoise/ANALYSIS.md`](denoise/ANALYSIS.md) | Chinese | Working notes on the score regression and the staged-reproduction plan |
 
 ## Status
 
@@ -100,6 +103,7 @@ MIT. See [LICENSE](LICENSE).
 
 ## References
 
-- StraightPCF: *Straight Point Cloud Filtering*, CVPR 2024.
+- StraightPCF: *Straight Point Cloud Filtering*, CVPR 2024 — the method reproduced here; the encoder and decoder follow its reference implementation.
 - ScoreDenoise: *Score-Based Point Cloud Denoising*, ICCV 2021 — the score-based variant in `src/model/score_vm.py`.
 - PCT: *Point Cloud Transformer*, Computational Visual Media 2021 — the classifier used in the qualification round.
+- PointNet++ (Qi et al., NeurIPS 2017) — `warmup/rf_ops.py` ports and adapts its `index_points`, `square_distance`, ball-query and KNN kernels, which are MIT-licensed.
